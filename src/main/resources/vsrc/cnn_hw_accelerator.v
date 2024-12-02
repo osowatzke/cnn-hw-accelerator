@@ -139,7 +139,7 @@ module cnn_hw_accelerator (
     // Parameters for selecting subregions of column counts
     localparam FILT_COL_CNT_WIDTH = CNT_WIDTH - VECTOR_SIZE_LOG2;
     localparam FILT_COL_CNT_LO    = VECTOR_SIZE_LOG2;
-    localparam FILT_COL_CNT_HI    = CNT_WIDTH;
+    localparam FILT_COL_CNT_HI    = CNT_WIDTH - 1;
     
     // FSM registers
     reg stateR;
