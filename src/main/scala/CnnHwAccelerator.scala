@@ -337,18 +337,23 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
 }
 
 
-class AlignmentBuffer(addrWidth: Int, beatBytes: Int) extends Module
+class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: Int) extends Module
 {
 
+    val sizeWidth  = log2Ceil(maxSize)
+    val elemBytes  = elemWidth / 8
+    val countWidth = sizeWidth + log2Ceil(elemBytes)
     val dataWidth  = 8 * beatBytes
-    val countWidth = addrWidth + log2Ceil(beatBytes) + 1
+    val shiftWidth = log2(ceil(beatBytes))
 
     val io = IO(new Bundle{
         val startIn    = Input(Bool())
-        val sizeIn     = Input(UInt((addrWidth+1).W))
+        val sizeIn     = Input(UInt(sizeWidth.W))
+        val baseAddrIn = Input(UInt(addrWidth.W))
         val wrValidIn  = Input(UInt(beatBytes.W))
         val wrDataIn   = Input(UInt(dataWidth.W))
-        val wrReadyOut = Output(Bool())
+        val wrReadyOut = Output(Bool())        
+        val wrReadyIn  = Input(Bool())
         val wrEnOut    = Output(UInt(beatBytes.W))
         val wrDataOut  = Output(UInt(beatBytes.W))
         val addrOut    = Output(UInt(addrWidth.W))
@@ -369,37 +374,40 @@ class AlignmentBuffer(addrWidth: Int, beatBytes: Int) extends Module
         }
         return mask
     }
-    
+
     object State extends ChiselEnum
     {
         val Init, Read = Value
     }
 
     val sizeBytes    = WireInit(0.U(countWidth.W))
-    sizeBytes       := Cat(io.sizeIn, 0.U(log2Ceil(beatBytes).W))
+    sizeBytes       := Cat(io.sizeIn, 0.U(log2Ceil(elemBytes).W))
 
     val ctrlFifo     = Module(new Fifo(UInt((beatBytes+addrWidth+1).W), 8, 1))
 
     validR           = RegInit(false.B)
     stateR           = RegInit(State.Init)
     bytesLeftR       = Reg(UInt(countWidth.W))
+    bytesReadR       = Reg(UInt((shiftWidth+1).W))
     nextAddrR        = Reg(UInt(addrWidth.W))
 
     validR          := false.B
     switch (stateR) {
         is (State.Init) {
             when (io.startIn) {
+                bytesReadR  := beatBytes.U - baseAddrIn(shiftWidth-1, 0)
                 bytesLeftR  := sizeBytes
-                nextAddrR   := 0
+                nextAddrR   := baseAddrIn
                 stateR      := State.Read
             }
         }
         is (State.Read) {
             when (ctrlFifo.io.enq.ready) {
                 validR      := true.B
-                bytesLeftR  := bytesLeftR - beatBytes
+                bytesReadR  := beatBytes.U
+                bytesLeftR  := bytesLeftR - bytesReadR
                 nextAddrR   := nextAddrR + beatBytes
-                when (bytesLeftR <= beatBytes) {
+                when (bytesLeftR <= bytesReadR) {
                     stateR  := State.Init
                 }
             }
@@ -407,15 +415,27 @@ class AlignmentBuffer(addrWidth: Int, beatBytes: Int) extends Module
     }
 
     addrR    = Reg(UInt(addrWidth.W))
+    shiftR   = Reg(UInt(shiftWidth.W))
     maskR    = Reg(UInt(beatBytes.W))
     lastR    = Reg(Bool())
 
-    addrR   := nextAddrR
+    addrR   := Cat(nextAddrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
+    shiftR  := nextAddrR(shiftWidth-1, 0)
     maskR   := getMask(bytesLeftR)
-    lastR   := bytesLeftR <= beatBytes ? true.B : false.B
+    lastR   := bytesLeftR <= bytesReadR ? true.B : false.B
+
+    valid2R  = RegInit(false.B)
+    addr2R   = Reg(UInt(addrWidth.W))
+    mask2R   = Reg(UInt(beatBytes.W))
+    last2R   = Reg(Bool())
+
+    valid2R := valid2R
+    addr2R  := addrR
+    mask2R  := maskR << shiftR;
+    last2R  := false.B
     
-    ctrlFifo.io.enq.bits    := Cat(lastR, maskR, addrR)
-    ctrlFifo.io.enq.valid   := validR
+    ctrlFifo.io.enq.bits    := Cat(last2R, mask2R, addr2R)
+    ctrlFifo.io.enq.valid   := valid2R
 
     val addrLo      = 0
     val addrHi      = addrLo + addrWidth - 1
@@ -428,7 +448,7 @@ class AlignmentBuffer(addrWidth: Int, beatBytes: Int) extends Module
     byteFifoRdData  = WireInit(Seq.fill(blockBytes)(0.U(8.W)))
 
     for (i <- 0 to (blockBytes-1)) {
-        val byteFifo             = Module(new Fifo(UInt(8.W), 8, 2))
+        val byteFifo             = Module(new Fifo(UInt(8.W), 8, 3))
         byteFifo.io.enq.valid   := io.wrValidIn(i)
         byteFifo.io.enq.bits    := (io.wrDataIn >> (8 * i))(7, 0)
         byteFifoWrReady(i)      := byteFifo.io.enq.valid
@@ -443,7 +463,7 @@ class AlignmentBuffer(addrWidth: Int, beatBytes: Int) extends Module
     io.wrReadyOut   := wrReadyR
 
     rdReady          = WireInit(false.B)
-    rdReady         := ctrlFifo.io.deq.valid & (ctrlFifo.io.deq.bits === byteFifoRdValid)
+    rdReady         := wrReadyIn & ctrlFifo.io.deq.valid & (ctrlFifo.io.deq.bits === byteFifoRdValid)
 
     byteFifoRdReady  = WireInit(false.B)
     byteFifoRdReady := rdReady ? ctrlFifo.io.deq.bits(maskHi, maskLo) : 0.U
