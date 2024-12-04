@@ -205,17 +205,155 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         /* Connect Read FIFO to arbitrator */
         readFifo.io.deq.ready       := readyReadyR
         
+        
+        tl_d_dataR                  := edge.data(tl.d.bits)
+
+        /* Connect Arbitrator to Read Alignment Buffer*/
+        rdAlignAddrMsbR              = RegInit(false.B)
+        when (cfgStartR(0)) {
+            rdAlignAddrMsbR         := not rdAlignAddrMsbR
+        }
+
+        
+        tl_d_readyR                 := readAlign.io.wrReadyOut
+        readAlign.io.wrValidIn      := tl_d_validR
+        readAlign.io.wrDataIn       := tl_d_dataR
+        readAlign.io.wrReadyIn      := true.B
+
+        /* Read Alignment Buffer Configuration Pipeline */
+        readAlignStartR             : false.B
+        when (io.startIn) {
+            readAlignStartR         := true.B
+            readAlignValidR         := 3.U
+            readAlignSourceR(0)     := io.dataAddrIn
+            readAlignSourceR(1)     := io.filtAddrIn
+            readAlignSizeR(0)       := io.dataColsIn * io.dataRowsIn
+            readAlignSizeR(1)       := io.filtColsIn * io.filtRowsIn
+        } .elsewhen (readAlign.io.lastOut) {
+            readAlignValidR         := readAlignValidR >> 1.U
+            readAlignSourcR(0)      := readAlignSourceR(1)
+            readAlignSizeR(0)       := readAlignSizeR(1)
+            when (readAlignValidR(1))  
+                readAlignStartR     := true.B
+            }
+        }
+
+        /* Read Alignment Buffer Configuration */
+        readAlign.io.startIn        := readAlignStartR
+        readAlign.io.sizeIn         := readAlignSizeR(0)
+        readAlign.io.destAddrIn     := Cat(!readAlignValidR(1), 0.U(addrWidth-1))
+        readAlign.io.sourcAddrIn    := readAlignSourceR(0)
+
+        /* Connect Hardware Accelerator to Read Alignment Buffer */
+        // Compute Hardware Accelerator Start Signal        
+        accStartR                   := RegInit(false.B)
+        lastStickyR                 := RegInit(false.B)
+
+        accStartR                   := false.B
+        when (readAlign.io.lastOut) {
+            when (lastStickyR) {
+                accStartR           := true.B
+                lastStickyR         := false.B
+            } .otherwise {
+                lastStickyR         := true.B
+            }
+        }
+
+        // Clock Hardware Accelerator Dimensions on Start
+        // Should not see another start signal until computation is complete
+        filtRowsR                    = Reg(UInt(countWidth.W))
+        filtColsR                    = Reg(UInt(countWidth.W))
+        when (io.startIn) {
+            filtRowsR               := io.filtRowsIn
+            filtColsR               := io.filtColsIn
+            dataRowsR               := io.dataRowsIn
+            dataColsR               := io.dataColsIn
+        }
+
+        // Source Connections
+        accelerator.io.filtRowsIn   := filtRowsR
+        accelerator.io.filtColsIn   := filtColsR
+        accelerator.io.dataRowsIn   := dataRowsR
+        accelerator.io.dataColsIn   := dataColsR
+        
+        accelerator.io.startIn      := accStartR
+        accelerator.io.wrEnIn       := readAlign.io.wrEnOut
+        accelerator.io.wrDataIn     := readAlign.io.wrDataOut
+        accelerator.io.addrIn       := readAlign.io.addrOut
+        
+        val accWrValid               = WireInit(false.B)
+        accWrValid                  := accelerator.io.validOut & wrAlign.io.rdReadyOut
+
+        // Sink Connections
+        when (io.startIn) {
+            writeShiftR             := 0.U
+        } .elseWhen (accWrValid) {
+            writeShiftR             := writeShiftR + 1.U
+        }
+
+        val wrEnHi                  := 15.U(4.W)
+        val wrEnLo                  := 0.U(4.W)
+        
+        val accWrEn                  = WireInit(UInt(4.W))
+        val accWrData                = WireInit(UInt(32.W))
+        accWrEn                     := accWrValid ? wrEnHi : wrEnLo
+        accWrData                   := accelerator.io.dataOut
+
+        val accWrEnR                 = RegInit(0.U(beatBytes.W))
+        val accWrDataR               = RegInit(0.U(dataWidth.W))
+
+        accWrEnR                    := Cat(0.U((beatBytes -  4).W),   accWrEn) << Cat(writeShiftR, 0.U(2.W))
+        accWrDataR                  := Cat(0.U((dataWidth - 32).W), accWrData) << Cat(writeShiftR, 0.U(5.W))
+
+        when (io.startIn) {
+            outSizeR                := 
+        }
+
+        wrAlign.io.startIn          := cfgStartR(1)
+        wrAlign.io.sizeIn           := outSizeR
+        wrAlign.io.destAddrIn       := destAddrR
+        wrAlign.io.sourceAddrIn     := 0.U
+        wrAlign.io.wrValidIn        := accWrEnR
+        wrAlign.io.wrDataIn         := accWrDataR
+
+        wrAlign.io.wrReadyIn        := writeFifo.io.enq.ready
+        writeFifo.io.enq.valid      := wrAlign.io.wrEnOut =/= 0.U
+        writeFifo.io.enq.data       := Cat(writeAlign.io.lastOut, 
+                                           writeAlign.io.addrOut,
+                                           writeAlign.io.wrEnOut,
+                                           writeAlign.io.wrDataOut)
+
+        val wrFifoDataLo             = 0
+        val wrFifoDataHi             = wrFifoDataLo + dataWidth - 1
+        val wrFifoEnLo               = wrFifoDataHi + 1
+        val wrFifoEnHi               = wrFifoEnLo + beatBytes - 1
+        val wrFifoAddrLo             = wrFifoEnHi + 1
+        val wrFifoAddrHi             = wrFifoAddrLo + addrWidth - 1
+        val wrFifoLastIdx            = wrFifoAddrHi + 1
+
+        val doneR                    = RegInit(false.B)
+        val arbStateR                = RegInit(ArbState.Idle)
+        val tl_d_lastR               = Reg(Bool())
+        val tl_a_bitsR               = Reg(tl.a.bits.cloneType)
+        val tl_a_validR              = RegInit(false.B)
+        val wrFifoReadyR             = RegInit(false.B)
+
+        val tl_a_data                = WireInit(0.U(busDataWidth.W))
+        val tl_a_addr                = WireInit(0.U(busAddrWidth.W))
+        val tl_a_mask                = WireInit(0.U(beatBytes.W))
+                     
+
         doneR                       := false.B
         switch (arbStateR) {
             is (ArbState.Idle) {
                 when (writeFifo.io.deq.valid) {
-                    tl_d_lastR      := writeFifo.io.deq.bits(dataBits+addrBits+blockBytes)
-                    tl_a_data       := writeFifo.io.deq.bits(dataBits+addrBits+blockBytes-1, addrBits+blockBytes)
-                    tl_a_addr       := writeFifo.io.deq.bits(addrBits+blockBytes-1, blockBytes)
-                    tl_a_mask       := writeFifo.io.deq.bits(blockBytes-1, 0)
+                    tl_d_lastR      := writeFifo.io.deq.bits(wrFifoLastIdx)
+                    tl_a_data       := writeFifo.io.deq.bits(wrFifoDataHi, wrFifoDataLo)
+                    tl_a_addr       := writeFifo.io.deq.bits(wrFifoAddrHi, wrFifoAddrLo)
+                    tl_a_mask       := writeFifo.io.deq.bits(wrFifoEnHi, wrFifoEnLo)
                     tl_a_bitsR      := edge.Put(0.U, tl_a_addr, log2Ceil(blockBytes).U, tl_a_data, tl_a_mask)._2
                     tl_a_validR     := true.B
-                    writeReadyR     := true.B
+                    wrFifoReadyR    := true.B
                     arbStateR       := ArbState.WaitA
                 } .elsewhen (readFifo.io.deq.ready) {
                     tl_a_addr       := readFifo.io.deq.bits(addrBits+blockBytes-1, blockBytes)
@@ -233,7 +371,7 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
                 }
             }
             is (ArbState.WaitD) {
-                tl_d_readyR         := readAlign.io.wrReadyOut & 
+                tl_d_readyR         := readAlign.io.wrReadyOut
                 when (tl.d.fire) {
                     tl_d_readyR     := false.B
                     tl_d_validR     := edge.hasData(tl.d.bits)
@@ -244,228 +382,7 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
             }
         }
 
-        tl_d_dataR                  := edge.data(tl.d.bits)
-
-        /* Connect Arbitrator to Read Alignment Buffer*/
-        readAlign.io.startIn        := cfgStartR(0)
-        readAlign.io.sizeIn         := cfgSize(0)
-        readAlign.io.destAddrIn     := Cat(addrMsbR, 0.U(addrWidth-1))
-        readAlign.io.sourcAddrIn    := cfgSource(0)
-        readAlign.io.wrValidIn      := tl_d_validR
-        readAlign.io.wrDataIn       := tl_d_dataR
-        
-        tl_d_readyR                 := readAlign.io.wrReadyOut
-
-        addrMsbR                 = RegInit(false.B)
-        addrMsbR                := cfgStartR(0) ? : not addrMsbR : addrMsbR
-
-
-
-        for (i <- 0 to 1) {
-
-            val cfgReadyR                = RegInit(false.B)
-            val cfgStateR                = RegInit(ConfigState.Idle)
-
-            val cfgFifo = Module(New Fifo(UInt((sizeWidth+2*addrWidth).W), 8, 0))
-            cfgFifo.io.enq.valid        := readStartR
-            cfgFifo.io.enq.bits         := Cat(readSizeR(0), readAddrR(0), destAddrR)
-            cfgFifo.io.deq.ready        := cfgReadyR
-
-            cfgSize(i)                  := cfgFifo.io.deq.bits(sizeHi, sizeLo)
-            cfgSource(i)                := cfgFifo.io.deq.bits(sourceHi, sourceLo)
-            cfgDest(i)                  := cfgFifo.io.deq.bits(destHi, destLo)
-
-            cfgReadyR                   := false.B
-            cfgStartR(i)                := false.B
-            switch (cfgStateR) {
-                is (ConfigState.Idle) {
-                    cfgReadyR           := true.B
-                    if (cfgFifo.io.deq.valid & cfgReadyR) {
-                        cfgStartR(i)    := true.B
-                        cfgStateR       := ConfigState.Running
-                    }
-                }
-                is (ConfigState.Running) {
-                    when (cfgLast(i)) {
-                        cfgReadyR       := true.B
-                        cfgStateR       := ConfigState.Idle
-                    }
-                }
-            }
-        }
-
-        
-        switch (readSelStateR) {
-            is (ReadSelState.ReadData) {
-                readAddrR           := io.dataAddr(addrBits-1, 0)
-                filtAddrR           := io.filtAddr(addrBits-1, 0)
-                readSizeR           := Cat(io.dataCols * io.dataRows, 0.U(dataBytesLog2))
-                filtSizeR           := Cat(io.filtCols * io.filtRows, 0.U(dataBytesLog2))
-                if (io.start) {
-                    readStartR      := true.B
-                    readSelStateR   := State.ReadFilt
-                }
-            }
-            is (ReadSelState.ReadFilt) {
-                readAddrR           := filtAddrR
-                readSizeR           := filtSizeR    
-                when (readDone2R) {
-                    readStartR      := false.B
-                    readSelStateR   := State.ReadData
-                }
-            }
-        }
-
-        readValid2R                 := false.B
-        readDone2R                  := false.B
-        switch (readState2R) {
-            is (ReadState.Idle) {
-                readSize2R          := readSizeR        
-                readAddrNext2R      := readAddrR
-                numBytesRead2R      := blockBytes.U - readSizeR(blockBytesLog2 - 1, 0)
-                when (readStartR) {
-                    readState2R     := ReadState.Read
-                }
-            }
-            is (ReadState.Read) {
-                when (readFifo.io.enq.ready) {
-                    readValid2R     := true.B
-                    numBytesRead2R  := blockBytes.U
-                    readSize2R      := readSize2R - numBytesRead2R
-                    readAddrNext2R  := readAddrNext2R + numBytesRead2R
-                    when (readSize2R <= numBytesRead2R) {
-                        readState2R := ReadState.Idle
-                        readDone2R  := true.B
-                    }
-                }
-            }
-        }
-
-        readAddr2R  := readAddrNext2R
-
-        readValid3R := readValid2R
-        readDone3R  := readDone2R
-        readAddr3R  := Cat(readAddr2R(addrBits-1, blockBytesLog2), 0.U(blockBytesLog2))
-        readMask3R  := getMask(readAddr2R, readSize2R)
-
-        readFifo.io.enq.valid = readValid3R
-        readFifo.io.enq.bits  = Cat(readDone3R, readMask3R, readAddr3R)
-
-        readFifo.io.deq.ready = arbFifo.io.enq.ready && !writeFifo.io.deq.valid
-        writeFifo.io.deq.ready = arbFifo.io.enq.ready
-
-        arbValidR := (writeFifo.io.deq.valid || readFifo.io.deq.valid) && arbFifo.io.enq.ready
-
-        val tl_a_data = WireInit(0.U(dataBits.W))
-        val tl_a_addr = WireInit(0.U(addrBits.W))
-        val tl_a_mask = WireInit(0.U(blockBytes.W))
-
-        when (writeFifo.io.deq.valid) {
-        
-        } .otherwise {
-            tl_a_addr   := readFifo.io.deq.bits()
-            arbDataR    := edge.Get(0.U, tl_a_addr, log2Ceil(blockBytes).U)._2
-        }
-
-        arbDataR := 
-
-        switch (arbStateR) {
-            when (readFifo.io.deq.valid) {
-                
-            }
-        }
-
-        switch (readStateR)
-        {
-            is (ReadState.Idle) {
-                numBytesReadR       := blockBytes.U - readAddrR(blockBytesLog2 - 1, 0)
-                bytesLeftReadR      := readSizeR
-                when (readStartR) {
-                    readStateR      := ReadState.Read
-                }
-            }
-            is (ReadState.Read) {
-                when (readFifo.io.enq.ready) {
-                    numBytesReadR   := blockBytes.u
-                    
-                }
-            }
-
-            when (readStartR){
-                readStateR  := 
-            }
-        }
-
-        if (postIdR == claimIdR)
-        {
-
-        }
-
-        when ()
-
-        when (tl.a.fire && !tl.d.fire) {
-            cntR        := cntR + 1
-        } .elsewhen (!t1.a.fire && tl.d.fire) {
-            cntR        := cntR - 1;
-        }
-
-        when (tl.a.fire) {
-            postIdR     := postIdR + 1
-        }
-
-        when (tl.d.fire) {
-            claimIdR    := claimIdR + 1
-        }
-
-
-
-        for (i <- 0 to (blockBytes-1))
-        {
-            val byteFifo             = Module(new Fifo(UInt(8.W), 8, 2))
-            byteFifo.io.enq.valid   := tlFifoWrEnVecR(i) && tl_d_validR
-            byteFifo.io.enq.bits    := (tlFifoWrDataR >> (8 * i))(7, 0)
-            tlFifoWrReady(i)        := byteFifo.io.enq.ready
-
-            byteFifoRdValid(i)      := byteFifo.io.deq.valid
-            byteFifo.io.deq.ready   := byteFifoRdReady(i)
-        }
-
-        bytesLeftR      := bytesLeftR - beatBytes
-        when (bytes)
-        when (bytesLeftR <= beatBytes) {
-            readStateR  :=  doneR
-        }
-
-
-        byteFifoRdReady := (byteFifoRdValid.asUInt === rdMaskR) ? rdMaskR : 0
-
-        ramWrEnR                    := byteFifoRdReady
-        ramWrDataR                  := byteFIfoRdData.asUInt
-
-        when (byteFifoRdValid.asUInt === rdMaskR) {
-            rdMaskR                 := rdMaskR >> 
-        }
-        
-        when () (ramWrEnR)
-        ramAddrR                    := 
-
-        byFifoWrReadyR              := (byteFifoWrReady.asUInt === -1.S(blockBytes.W).asUInt)
-        byteFifoRdDataR             := byteFifoRdData.asUInt
-
-        when (tlFifo)
-        switch(writeStateR) {
-            is (WriteState.Init) {
-                addrR               := 0
-            }
-            is (WriteState.Wait) {
-                when (byteFifoRdReady == ) {
-
-                }
-                addrR               := addrR + 1
-            }
-        }
-
-
+        tl_d_bitsR                  := 
     }
 }
 
