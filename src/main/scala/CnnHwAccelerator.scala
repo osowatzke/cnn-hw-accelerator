@@ -386,7 +386,7 @@ class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(im
     }
 }
 
-class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends LazyModule
+class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(implicit p: Parameters) extends LazyModule
 {
     val node = TLClientNode(Seq(TLMasterPortParameters.v1(Seq(TLClientParameters(
         name = "cnn-hw-accelerator-client",
@@ -406,6 +406,7 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
             val filtRows   = Input(UInt(32.W))
             val destAddr   = Input(UInt(64.W))
             val start      = Input(Bool())
+            val done       = Output(Bool())
         })
 
         val (tl, edge) = node.out(0)
@@ -417,7 +418,7 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         // Hardware Accelerator Constants
         val dataWidth   = 32
         val dataBytes   = dataWidth/8
-        val dimWidth    = log2Ceil(p.maxSize) + 1
+        val dimWidth    = log2Ceil(params.maxSize) + 1
         val countWidth  = dimWidth + log2Ceil(dataBytes)
         val shiftWidth  = log2Ceil(beatBytes/dataBytes)
         val accumWrEnHi = -1.S(dataBytes.W).asUInt
@@ -511,19 +512,19 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         val rdFifoReadyR   = RegInit(false.B)
 
         // Read Controller
-        val readCtrl = Module(new ReadController(p.maxSize, dataWidth, busAddrWidth, beatBytes))
+        val readCtrl = Module(new ReadController(params.maxSize, dataWidth, busAddrWidth, beatBytes))
 
         // Read Alignment Buffer
-        val readAlign = Module(new AlignmentBuffer(p.maxSize, dataWidth, addrWidth, beatBytes))
+        val readAlign = Module(new AlignmentBuffer(params.maxSize, dataWidth, addrWidth, beatBytes))
 
         // Read FIFO
         val readFifo    = Module(new Fifo(UInt(rdFifoWidth.W), 8, 2))
 
         // Hardware Accelerator
-        val accelerator = Module(new CnnHwAcceleratorBlackBox(busAddrWidth, busDataWidth, p.vectorSize, p.maxSize))
+        val accelerator = Module(new CnnHwAcceleratorBlackBox(busAddrWidth, busDataWidth, params.vectorSize, params.maxSize))
 
         // Write Alignment Buffer        
-        val writeAlign = Module(new AlignmentBuffer(p.maxSize, dataWidth, busAddrWidth, beatBytes))
+        val writeAlign = Module(new AlignmentBuffer(params.maxSize, dataWidth, busAddrWidth, beatBytes))
 
         // Write FIFO
         val writeFifo   = Module(new Fifo(UInt(wrFifoWidth.W), 8, 2))
@@ -714,3 +715,34 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
     }
 }
 
+class CnnHwAccelerator(params: CnnHwAcceleratorParams, managerBeatBytes: Int, clientBeatBytes: Int)(implicit p: Parameters) extends LazyModule {
+
+    val accManager  = LazyModule(new CnnHwAcceleratorManager(params, managerBeatBytes))
+    val accClient   = LazyModule(new CnnHwAcceleratorClient(params, clientBeatBytes))
+
+    val client      = TLIdentityNode()
+    val manager     = TLIdentityNode()
+
+    accManager.node := manager
+    client := accClient.node
+
+    lazy val module = new Impl
+
+    class Impl extends LazyModuleImp(this) {
+
+        val io = IO(new Bundle{
+            val done = Output(Bool())
+        })
+        
+        accClient.module.io.dataAddr   := accManager.module.io.dataAddr
+        accClient.module.io.dataCols   := accManager.module.io.dataCols
+        accClient.module.io.dataRows   := accManager.module.io.dataRows
+        accClient.module.io.filtAddr   := accManager.module.io.filtAddr
+        accClient.module.io.filtCols   := accManager.module.io.filtCols
+        accClient.module.io.filtRows   := accManager.module.io.filtRows
+        accClient.module.io.destAddr   := accManager.module.io.destAddr
+        accClient.module.io.start      := accManager.module.io.start
+
+        io.done := accClient.module.io.done
+    }
+}
