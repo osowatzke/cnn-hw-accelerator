@@ -159,16 +159,141 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
             p.vectorSize,
             p.maxSize)
 
-        val readAlign   = Module(New AlignmentBuffer(maxSize, elemWidth, addrWidth,    beatBytes))
-        val writeAlign  = Module(New AlignmentBuffer(maxSize, elemWidth, busAddrWidth, beatBytes))
-
-        ReadState.Init
-
-        ReadState.Idle
-
+        val readCtrl    = Module(new ReadController (maxSize, elemWidth, busAddrWidth, beatBytes))
+        val readAlign   = Module(new AlignmentBuffer(maxSize, elemWidth, addrWidth,    beatBytes))
+        val writeAlign  = Module(new AlignmentBuffer(maxSize, elemWidth, busAddrWidth, beatBytes))
 
         val readFifo    = Module(new Fifo(UInt((addrBits + blockBytes).W), 8, 2))
         val writeFifo   = Module(new Fifo(UInt((dataBits + addrBits + blockBytes + 1).W), 8, 2))
+
+        readStartR      := false.B
+        switch (readStateR) {
+            is (ReadState.Idle) {
+                when (io.startIn) {
+                    readAddrR(0)        := io.dataAddr
+                    readAddrR(1)        := io.filtAddr
+                    readSizeR(0)        := Cat(io.dataCols * io.dataRows, 0.U(dataBytesLog2))
+                    readSizeR(1)        := Cat(io.filtCols * io.filtRows, 0.U(dataBytesLog2))
+                    readValidR          := 3.U
+                    readStartR          := true.B
+                }
+            }
+            is (ReadState.Read) {
+                when (readCtrl.io.lastOut) {
+                    readValidR          := readValidR >> 1
+                    readAddrR(0)        := readAddrR(1)
+                    readSizeR(0)        := readSizeR(1)
+                    when (readValidR === 1.U) {
+                        readStateR      := ReadState.Idle
+                    } .otherwise {
+                        readStartR      := true.B
+                    }
+                }
+            }
+        }
+
+        /* Connect FSM to Read Controller */
+        readCtrl.io.startIn         := readStartR
+        readCtrl.io.sizeIn          := readSizeR(0)
+        readCtrl.io.sourceAddrIn    := readAddrR(0)
+
+        /* Connect Read Controller to Read FIFO */
+        readCtrl.io.rdReadyIn       := readFifo.io.enq.ready
+        readFifo.io.enq.valid       := readCtrl.io.rdValidOut
+        readFifo.io.enq.bits        := Cat(readCtrl.io.rdEnOut, readCtrl.io.addrOut)
+
+        /* Connect Read FIFO to arbitrator */
+        readFifo.io.deq.ready       := readyReadyR
+        
+        doneR                       := false.B
+        switch (arbStateR) {
+            is (ArbState.Idle) {
+                when (writeFifo.io.deq.valid) {
+                    tl_d_lastR      := writeFifo.io.deq.bits(dataBits+addrBits+blockBytes)
+                    tl_a_data       := writeFifo.io.deq.bits(dataBits+addrBits+blockBytes-1, addrBits+blockBytes)
+                    tl_a_addr       := writeFifo.io.deq.bits(addrBits+blockBytes-1, blockBytes)
+                    tl_a_mask       := writeFifo.io.deq.bits(blockBytes-1, 0)
+                    tl_a_bitsR      := edge.Put(0.U, tl_a_addr, log2Ceil(blockBytes).U, tl_a_data, tl_a_mask)._2
+                    tl_a_validR     := true.B
+                    writeReadyR     := true.B
+                    arbStateR       := ArbState.WaitA
+                } .elsewhen (readFifo.io.deq.ready) {
+                    tl_a_addr       := readFifo.io.deq.bits(addrBits+blockBytes-1, blockBytes)
+                    tl_a_bitsR      := edge.Get(0.U, tl_a_addr, log2Ceil(blockBytes).U)._2
+                    tl_a_validR     := true.B
+                    readReadyR      := true.B
+                    arbStateR       := ArbState.WaitA
+                }
+            }
+            is (ArbState.WaitA) {
+                when (tl.a.fire) {
+                    tl_a_validR     := false.B
+                    tl_d_readyR     := readAlign.io.wrReadyOut
+                    arbStateR       := ArbState.WaitD
+                }
+            }
+            is (ArbState.WaitD) {
+                tl_d_readyR         := readAlign.io.wrReadyOut & 
+                when (tl.d.fire) {
+                    tl_d_readyR     := false.B
+                    tl_d_validR     := edge.hasData(tl.d.bits)
+                    when (tl_d_lastR) {
+                        doneR       := true.B
+                    }
+                }
+            }
+        }
+
+        tl_d_dataR                  := edge.data(tl.d.bits)
+
+        /* Connect Arbitrator to Read Alignment Buffer*/
+        readAlign.io.startIn        := cfgStartR(0)
+        readAlign.io.sizeIn         := cfgSize(0)
+        readAlign.io.destAddrIn     := Cat(addrMsbR, 0.U(addrWidth-1))
+        readAlign.io.sourcAddrIn    := cfgSource(0)
+        readAlign.io.wrValidIn      := tl_d_validR
+        readAlign.io.wrDataIn       := tl_d_dataR
+        
+        tl_d_readyR                 := readAlign.io.wrReadyOut
+
+        addrMsbR                 = RegInit(false.B)
+        addrMsbR                := cfgStartR(0) ? : not addrMsbR : addrMsbR
+
+
+
+        for (i <- 0 to 1) {
+
+            val cfgReadyR                = RegInit(false.B)
+            val cfgStateR                = RegInit(ConfigState.Idle)
+
+            val cfgFifo = Module(New Fifo(UInt((sizeWidth+2*addrWidth).W), 8, 0))
+            cfgFifo.io.enq.valid        := readStartR
+            cfgFifo.io.enq.bits         := Cat(readSizeR(0), readAddrR(0), destAddrR)
+            cfgFifo.io.deq.ready        := cfgReadyR
+
+            cfgSize(i)                  := cfgFifo.io.deq.bits(sizeHi, sizeLo)
+            cfgSource(i)                := cfgFifo.io.deq.bits(sourceHi, sourceLo)
+            cfgDest(i)                  := cfgFifo.io.deq.bits(destHi, destLo)
+
+            cfgReadyR                   := false.B
+            cfgStartR(i)                := false.B
+            switch (cfgStateR) {
+                is (ConfigState.Idle) {
+                    cfgReadyR           := true.B
+                    if (cfgFifo.io.deq.valid & cfgReadyR) {
+                        cfgStartR(i)    := true.B
+                        cfgStateR       := ConfigState.Running
+                    }
+                }
+                is (ConfigState.Running) {
+                    when (cfgLast(i)) {
+                        cfgReadyR       := true.B
+                        cfgStateR       := ConfigState.Idle
+                    }
+                }
+            }
+        }
+
         
         switch (readSelStateR) {
             is (ReadSelState.ReadData) {
