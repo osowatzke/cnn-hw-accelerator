@@ -124,30 +124,6 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
             val start      = Input(Bool())
         })
 
-        def getMask(addr: UInt, size: UInt) : UInt =
-        {
-            val addrStart = addr(blockBytesLog2-1, 0)
-            val sizeTrunc = size(blockBytesLog2-1, 0)
-            val addrEnd = WireInit(0.U((blockBytesLog2+1).W))
-            when (size < blockBytes.U)
-            {
-                addrEnd := addrStart +& size(blockBytesLog2-1, 0)
-            }
-            .otherwise
-            {
-                addrEnd := addrStart +& blockBytes.U
-            }
-            val mask = VecInit(Seq.fill(blockBytes)(false.B))
-            for (i <- 0 to (blockBytes-1))
-            {
-                when ((addrStart <= i.U) && (i.U < addrEnd))
-                {
-                    mask(i) := true.B
-                }
-            }
-            return mask.asUInt
-        }
-
         val (tl, edge) = node.out(0)
     
         // Bus Constants
@@ -270,13 +246,13 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
 
         // Input Pipeline #1
         startR          := io.startIn
-        dataSizeR       := Cat(io.dataColsIn * io.dataRowsIn, 0.U(log2Ceil(dataBytes).W))
-        filtSizeR       := Cat(io.filtColsIn * io.filtRowsIn, 0.U(log2Ceil(dataBytes).W))
-        resultColsR     := io.dataColsIn - io.filtColsIn + 1.U
-        resultRowsR     := io.dataRowsIn - io.filtRowsIn + 1.U
-        dataAddrR       := io.dataAddrIn
-        filtAddrR       := io.filtAddrIn
-        destAddrR       := io.destAddrIn
+        dataSizeR       := Cat(io.dataColsIn(dimWidth-1, 0) * io.dataRowsIn(dimWidth-1, 0), 0.U(log2Ceil(dataBytes).W))
+        filtSizeR       := Cat(io.filtColsIn(dimWidth-1, 0) * io.filtRowsIn(dimWidth-1, 0), 0.U(log2Ceil(dataBytes).W))
+        resultColsR     := io.dataColsIn(dimWidth-1, 0) - io.filtColsIn(dimWidth-1, 0) + 1.U
+        resultRowsR     := io.dataRowsIn(dimWidth-1, 0) - io.filtRowsIn(dimWidth-1, 0) + 1.U
+        dataAddrR       := io.dataAddrIn(busAddrWidth-1, 0)
+        filtAddrR       := io.filtAddrIn(busAddrWidth-1, 0)
+        destAddrR       := io.destAddrIn(busAddrWidth-1, 0)
 
         // Input Pipeline #2
         start2R         := startR
@@ -360,10 +336,10 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         // Clock Hardware Accelerator Dimensions on Start
         // Should not see another start signal until computation is complete
         when (io.startIn) {
-            filtColsR               := io.filtColsIn
-            filtRowsR               := io.filtRowsIn
-            dataColsR               := io.dataColsIn
-            dataRowsR               := io.dataRowsIn
+            filtColsR               := io.filtColsIn(dimWidth-1, 0)
+            filtRowsR               := io.filtRowsIn(dimWidth-1, 0)
+            dataColsR               := io.dataColsIn(dimWidth-1, 0)
+            dataRowsR               := io.dataRowsIn(dimWidth-1, 0)
         }
 
         // Source Connections
