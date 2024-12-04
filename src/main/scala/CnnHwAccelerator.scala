@@ -347,17 +347,18 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     val shiftWidth = log2(ceil(beatBytes))
 
     val io = IO(new Bundle{
-        val startIn    = Input(Bool())
-        val sizeIn     = Input(UInt(sizeWidth.W))
-        val baseAddrIn = Input(UInt(addrWidth.W))
-        val wrValidIn  = Input(UInt(beatBytes.W))
-        val wrDataIn   = Input(UInt(dataWidth.W))
-        val wrReadyOut = Output(Bool())        
-        val wrReadyIn  = Input(Bool())
-        val wrEnOut    = Output(UInt(beatBytes.W))
-        val wrDataOut  = Output(UInt(beatBytes.W))
-        val addrOut    = Output(UInt(addrWidth.W))
-        val lastOut    = Output(Bool())
+        val startIn      = Input(Bool())
+        val sizeIn       = Input(UInt(sizeWidth.W))
+        val destAddrIn   = Input(UInt(addrWidth.W))
+        val sourceAddrIn = Input(UInt(addrWidth.W))
+        val wrValidIn    = Input(UInt(beatBytes.W))
+        val wrDataIn     = Input(UInt(dataWidth.W))
+        val wrReadyOut   = Output(Bool())        
+        val wrReadyIn    = Input(Bool())
+        val wrEnOut      = Output(UInt(beatBytes.W))
+        val wrDataOut    = Output(UInt(beatBytes.W))
+        val addrOut      = Output(UInt(addrWidth.W))
+        val lastOut      = Output(Bool())
     })
 
     def getMask(bytesLeft : UInt) : UInt {
@@ -387,6 +388,7 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
 
     validR           = RegInit(false.B)
     stateR           = RegInit(State.Init)
+    sourceShiftR     = Reg(UInt(sourceWidth.W))
     bytesLeftR       = Reg(UInt(countWidth.W))
     bytesReadR       = Reg(UInt((shiftWidth+1).W))
     nextAddrR        = Reg(UInt(addrWidth.W))
@@ -397,21 +399,22 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     switch (stateR) {
         is (State.Init) {
             when (io.startIn) {
-                nextStartR  := true.B
-                bytesReadR  := beatBytes.U - baseAddrIn(shiftWidth-1, 0)
-                bytesLeftR  := sizeBytes
-                nextAddrR   := baseAddrIn
-                stateR      := State.Read
+                nextStartR      := true.B
+                sourceShiftR    := sourceAddrIn(shiftWidth-1, 0)
+                bytesReadR      := beatBytes.U - destAddrIn(shiftWidth-1, 0)
+                bytesLeftR      := sizeBytes
+                nextAddrR       := destAddrIn
+                stateR          := State.Read
             }
         }
         is (State.Read) {
             when (ctrlFifo.io.enq.ready) {
-                validR      := true.B
-                bytesReadR  := beatBytes.U
-                bytesLeftR  := bytesLeftR - bytesReadR
-                nextAddrR   := nextAddrR + bytesReadR
+                validR          := true.B
+                bytesReadR      := beatBytes.U
+                bytesLeftR      := bytesLeftR - bytesReadR
+                nextAddrR       := nextAddrR + bytesReadR
                 when (bytesLeftR <= bytesReadR) {
-                    stateR  := State.Init
+                    stateR      := State.Init
                 }
             }
         }
@@ -424,7 +427,7 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     lastR    = Reg(Bool())
 
     addrR   := Cat(nextAddrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
-    shiftR  := nextAddrR(shiftWidth-1, 0)
+    shiftR  := nextAddrR(shiftWidth-1, 0) - sourceShiftR
     maskR   := getMask(bytesLeftR)
     startR  := nextStartR
     lastR   := bytesLeftR <= bytesReadR ? true.B : false.B
