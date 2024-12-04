@@ -151,8 +151,10 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         val (tl, edge) = node.out(0)
 
         // Hardware Accelerator Constants
-        val dataWidth = 32
-        val dataBytes = dataWidth/8
+        val dataWidth   = 32
+        val dataBytes   = dataWidth/8
+        val dimWidth    = log2Ceil(p.maxSize) + 1
+        val countWidth  = dimWidth + log2Ceil(dataBytes)
     
         // Bus Constants
         val busAddrWidth = edge.bundle.addressBits
@@ -174,6 +176,23 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         val wrFifoAddrHi  = wrFifoAddrLo + addrWidth - 1
         val wrFifoLastIdx = wrFifoAddrHi + 1
         val wrFifoWidth   = wrFifoLastIdx + 1
+
+        // Input Pipeline #1
+        val startR      = RegInit(false.B)
+        val dataSizeR   = Reg(UInt(countWidth.W))
+        val filtSizeR   = Reg(UInt(countWidth.W))
+        val resultColsR = Reg(UInt(dimWidth.W))
+        val resultRowsR = Reg(UInt(dimWidth.W))
+        val dataAddrR   = Reg(UInt(busAddrWidth.W))
+        val filtAddrR   = Reg(UInt(busAddrWidth.W))
+
+        // Input Pipeline #2
+        val start2R      = RegInit(false.B)
+        val dataSize2R   = Reg(UInt(countWidth.W))
+        val filtSize2R   = Reg(UInt(countWidth.W))
+        val resultSize2R = Reg(UInt(countWidth.W))
+        val dataAddr2R   = Reg(UInt(busAddrWidth.W))
+        val filtAddr2R   = Reg(UInt(busAddrWidth.W))
 
         // Read Controller
         val readCtrl = Module(new ReadController(p.maxSize, dataWidth, busAddrWidth, beatBytes))
@@ -199,12 +218,16 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         filtSizeR       := Cat(io.filtColsIn * io.filtRowsIn, 0.U(log2Ceil(dataBytes).W))
         resultColsR     := io.dataColsIn - io.filtColsIn + 1.U
         resultRowsR     := io.dataRowsIn - io.filtRowsIn + 1.U
+        dataAddrR       := io.dataAddrIn
+        filtAddrR       := io.filtAddrIn
 
         // Input Pipeline #2
         start2R         := startR
         dataSize2R      := dataSizeR
         filtSize2R      := filtSizeR
         resultSize2R    := Cat(io.resultColsR * io.resultRowsR, 0.U(log2Ceil(dataBytes).W))
+        dataAddr2R      := dataAddrR
+        filtAddr2R      := filtAddrR
 
         // Read Control Pipeline
         rdCtrlStartR    := false.B
@@ -225,89 +248,46 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         }
 
         // Read Controller Connections
+        // Configuration Pipeline
         readCtrl.io.startIn         := readStartR
         readCtrl.io.sizeIn          := readSizeR(0)
         readCtrl.io.sourceAddrIn    := readAddrR(0)
 
-        readStartR      := false.B
-        switch (readStateR) {
-            is (ReadState.Idle) {
-                when (io.startIn) {
-                    readAddrR(0)        := io.dataAddr
-                    readAddrR(1)        := io.filtAddr
-                    readSizeR(0)        := Cat(io.dataCols * io.dataRows, 0.U(dataBytesLog2))
-                    readSizeR(1)        := Cat(io.filtCols * io.filtRows, 0.U(dataBytesLog2))
-                    readValidR          := 3.U
-                    readStartR          := true.B
-                }
-            }
-            is (ReadState.Read) {
-                when (readCtrl.io.lastOut) {
-                    readValidR          := readValidR >> 1
-                    readAddrR(0)        := readAddrR(1)
-                    readSizeR(0)        := readSizeR(1)
-                    when (readValidR === 1.U) {
-                        readStateR      := ReadState.Idle
-                    } .otherwise {
-                        readStartR      := true.B
-                    }
-                }
-            }
-        }
-
-        /* Connect FSM to Read Controller */
-        readCtrl.io.startIn         := readStartR
-        readCtrl.io.sizeIn          := readSizeR(0)
-        readCtrl.io.sourceAddrIn    := readAddrR(0)
-
-        /* Connect Read Controller to Read FIFO */
+        // Read FIFO
         readCtrl.io.rdReadyIn       := readFifo.io.enq.ready
         readFifo.io.enq.valid       := readCtrl.io.rdValidOut
-        readFifo.io.enq.bits        := Cat(readCtrl.io.rdEnOut, readCtrl.io.addrOut)
-
-        /* Connect Read FIFO to arbitrator */
-        readFifo.io.deq.ready       := readyReadyR
+        readFifo.io.enq.bits        := Cat(readCtrl.io.addrOut, readCtrl.io.rdEnOut)
         
-        
-        tl_d_dataR                  := edge.data(tl.d.bits)
-
-        /* Connect Arbitrator to Read Alignment Buffer*/
-        rdAlignAddrMsbR              = RegInit(false.B)
-        when (cfgStartR(0)) {
-            rdAlignAddrMsbR         := not rdAlignAddrMsbR
+        // Read Alignment Buffer Configuration Pipeline
+        rdAlignStartR               := false.B
+        when (start2R) {
+            rdAlignStartR           := true.B
+            rdAlignValidR           := 3.U
+            rdAlignSourceR(0)       := dataAddr2R
+            rdAlignSourceR(1)       := filtAddr2R
+            rdAlignSizeR(0)         := dataSize2R
+            rdAlignSizeR(1)         := filtSize2R
+        } .elsewhen (readAlign.io.lastOut) {
+            rdAlignValidR           := rdAlignValidR >> 1.U
+            rdAlignSourcR(0)        := rdAlignSourceR(1)
+            rdAlignSizeR(0)         := rdAlignSizeR(1)
+            when (rdAlignValidR(1))  
+                rdAlignStartR       := true.B
+            }
         }
 
-        
-        tl_d_readyR                 := readAlign.io.wrReadyOut
+        // Read Alignment Buffer Configuration
+        readAlign.io.startIn        := rdAlignStartR
+        readAlign.io.sizeIn         := rdAlignSizeR(0)
+        readAlign.io.destAddrIn     := Cat(!rdAlignValidR(1), 0.U((addrWidth-1).W))
+        readAlign.io.sourcAddrIn    := rdAlignSourceR(0)
+
+        // Connect Bus to Read Alignment Buffer
         readAlign.io.wrValidIn      := tl_d_validR
         readAlign.io.wrDataIn       := tl_d_dataR
         readAlign.io.wrReadyIn      := true.B
 
-        /* Read Alignment Buffer Configuration Pipeline */
-        readAlignStartR             : false.B
-        when (io.startIn) {
-            readAlignStartR         := true.B
-            readAlignValidR         := 3.U
-            readAlignSourceR(0)     := io.dataAddrIn
-            readAlignSourceR(1)     := io.filtAddrIn
-            readAlignSizeR(0)       := io.dataColsIn * io.dataRowsIn
-            readAlignSizeR(1)       := io.filtColsIn * io.filtRowsIn
-        } .elsewhen (readAlign.io.lastOut) {
-            readAlignValidR         := readAlignValidR >> 1.U
-            readAlignSourcR(0)      := readAlignSourceR(1)
-            readAlignSizeR(0)       := readAlignSizeR(1)
-            when (readAlignValidR(1))  
-                readAlignStartR     := true.B
-            }
-        }
-
-        /* Read Alignment Buffer Configuration */
-        readAlign.io.startIn        := readAlignStartR
-        readAlign.io.sizeIn         := readAlignSizeR(0)
-        readAlign.io.destAddrIn     := Cat(!readAlignValidR(1), 0.U(addrWidth-1))
-        readAlign.io.sourcAddrIn    := readAlignSourceR(0)
-
-        /* Connect Hardware Accelerator to Read Alignment Buffer */
+        // Connect Hardware Accelerator to Read Alignment Buffer
         // Compute Hardware Accelerator Start Signal        
         accStartR                   := RegInit(false.B)
         lastStickyR                 := RegInit(false.B)
@@ -399,7 +379,6 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
         val tl_a_addr                = WireInit(0.U(busAddrWidth.W))
         val tl_a_mask                = WireInit(0.U(beatBytes.W))
                      
-
         doneR                       := false.B
         switch (arbStateR) {
             is (ArbState.Idle) {
@@ -416,7 +395,7 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
                     tl_a_addr       := readFifo.io.deq.bits(addrBits+blockBytes-1, blockBytes)
                     tl_a_bitsR      := edge.Get(0.U, tl_a_addr, log2Ceil(blockBytes).U)._2
                     tl_a_validR     := true.B
-                    readReadyR      := true.B
+                    rdFifoReadyR    := true.B
                     arbStateR       := ArbState.WaitA
                 }
             }
@@ -439,7 +418,10 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
             }
         }
 
-        tl_d_bitsR                  := 
+        tl_d_dataR                  := edge.data(tl.d.bits) 
+
+        readFifo.io.deq.ready       := rdFifoReadyR
+        writeFifo.io.deq.ready      := wrFifoReadyR
     }
 }
 
