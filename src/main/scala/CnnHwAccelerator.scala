@@ -150,21 +150,84 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
 
         val (tl, edge) = node.out(0)
 
+        // Hardware Accelerator Constants
+        val dataWidth = 32
+        val dataBytes = dataWidth/8
+    
+        // Bus Constants
         val busAddrWidth = edge.bundle.addressBits
-        val busDataWidth = 8 * beatBytes
+        val busDataWidth = 8*beatBytes
 
-        val accelerator = CnnHwAcceleratorBlackBox(
-            busAddrWidth,
-            busDataWidth,
-            p.vectorSize,
-            p.maxSize)
+        // Read FIFO Configuration
+        val rdFifoEnLo   = 0
+        val rdFifoEnHi   = rdFifoEnLo + beatBytes - 1
+        val rdFifoAddrLo = rdFifoEnHi + 1
+        val rdFifoAddrHi = rdFifoAddrLo + busAddrWidth - 1
+        val rdFifoWidth  = rdFifoAddrHi + 1
 
-        val readCtrl    = Module(new ReadController (maxSize, elemWidth, busAddrWidth, beatBytes))
-        val readAlign   = Module(new AlignmentBuffer(maxSize, elemWidth, addrWidth,    beatBytes))
-        val writeAlign  = Module(new AlignmentBuffer(maxSize, elemWidth, busAddrWidth, beatBytes))
+        // Write FIFO Configuration
+        val wrFifoDataLo  = 0
+        val wrFifoDataHi  = wrFifoDataLo + dataWidth - 1
+        val wrFifoEnLo    = wrFifoDataHi + 1
+        val wrFifoEnHi    = wrFifoEnLo + beatBytes - 1
+        val wrFifoAddrLo  = wrFifoEnHi + 1
+        val wrFifoAddrHi  = wrFifoAddrLo + addrWidth - 1
+        val wrFifoLastIdx = wrFifoAddrHi + 1
+        val wrFifoWidth   = wrFifoLastIdx + 1
 
-        val readFifo    = Module(new Fifo(UInt((addrBits + blockBytes).W), 8, 2))
-        val writeFifo   = Module(new Fifo(UInt((dataBits + addrBits + blockBytes + 1).W), 8, 2))
+        // Read Controller
+        val readCtrl = Module(new ReadController(p.maxSize, dataWidth, busAddrWidth, beatBytes))
+
+        // Read Alignment Buffer
+        val readAlign = Module(new AlignmentBuffer(p.maxSize, dataWidth, addrWidth, beatBytes))
+
+        // Read FIFO
+        val readFifo    = Module(new Fifo(UInt(rdFifoWidth.W), 8, 2))
+
+        // Hardware Accelerator
+        val accelerator = Module(new CnnHwAcceleratorBlackBox(busAddrWidth, busDataWidth, p.vectorSize, p.maxSize))
+
+        // Write Alignment Buffer        
+        val writeAlign = Module(new AlignmentBuffer(p.maxSize, dataWidth, busAddrWidth, beatBytes))
+
+        // Write FIFO
+        val writeFifo   = Module(new Fifo(UInt(wrFifoWidth.W), 8, 2))
+
+        // Input Pipeline #1
+        startR          := io.startIn
+        dataSizeR       := Cat(io.dataColsIn * io.dataRowsIn, 0.U(log2Ceil(dataBytes).W))
+        filtSizeR       := Cat(io.filtColsIn * io.filtRowsIn, 0.U(log2Ceil(dataBytes).W))
+        resultColsR     := io.dataColsIn - io.filtColsIn + 1.U
+        resultRowsR     := io.dataRowsIn - io.filtRowsIn + 1.U
+
+        // Input Pipeline #2
+        start2R         := startR
+        dataSize2R      := dataSizeR
+        filtSize2R      := filtSizeR
+        resultSize2R    := Cat(io.resultColsR * io.resultRowsR, 0.U(log2Ceil(dataBytes).W))
+
+        // Read Control Pipeline
+        rdCtrlStartR    := false.B
+        when (start2R) {
+            rdCtrlAddrR(0)      := dataAddr2R
+            rdCtrlAddrR(1)      := filtAddr2R
+            rdCtrlSizeR(0)      := dataSize2R
+            rdCtrlSizeR(1)      := filtSize2R
+            rdCtrlValidR        := 3.U
+            rdCtrlStartR        := true.B
+        .elsewhen (readCtrl.io.lastOut) {
+            rdCtrlValidR        := rdCtrlValidR >> 1
+            rdCtrlAddrR(0)      := rdCtrlAddrR(1)
+            rdCtlrSizeR(0)      := rdCtrlSizeR(1)
+            when (rdCtrlValidR(1)) {
+                rdCtrlStartR    := true.B
+            }
+        }
+
+        // Read Controller Connections
+        readCtrl.io.startIn         := readStartR
+        readCtrl.io.sizeIn          := readSizeR(0)
+        readCtrl.io.sourceAddrIn    := readAddrR(0)
 
         readStartR      := false.B
         switch (readStateR) {
@@ -323,13 +386,7 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
                                            writeAlign.io.wrEnOut,
                                            writeAlign.io.wrDataOut)
 
-        val wrFifoDataLo             = 0
-        val wrFifoDataHi             = wrFifoDataLo + dataWidth - 1
-        val wrFifoEnLo               = wrFifoDataHi + 1
-        val wrFifoEnHi               = wrFifoEnLo + beatBytes - 1
-        val wrFifoAddrLo             = wrFifoEnHi + 1
-        val wrFifoAddrHi             = wrFifoAddrLo + addrWidth - 1
-        val wrFifoLastIdx            = wrFifoAddrHi + 1
+        
 
         val doneR                    = RegInit(false.B)
         val arbStateR                = RegInit(ArbState.Idle)
