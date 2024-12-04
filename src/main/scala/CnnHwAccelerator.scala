@@ -383,18 +383,21 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     val sizeBytes    = WireInit(0.U(countWidth.W))
     sizeBytes       := Cat(io.sizeIn, 0.U(log2Ceil(elemBytes).W))
 
-    val ctrlFifo     = Module(new Fifo(UInt((beatBytes+addrWidth+1).W), 8, 1))
+    val ctrlFifo     = Module(new Fifo(UInt((beatBytes+addrWidth+shiftWidth+1).W), 8, 1))
 
     validR           = RegInit(false.B)
     stateR           = RegInit(State.Init)
     bytesLeftR       = Reg(UInt(countWidth.W))
     bytesReadR       = Reg(UInt((shiftWidth+1).W))
     nextAddrR        = Reg(UInt(addrWidth.W))
+    nextStartR       = Reg(Bool())
 
     validR          := false.B
+    nextStartR      := false.B
     switch (stateR) {
         is (State.Init) {
             when (io.startIn) {
+                nextStartR  := true.B
                 bytesReadR  := beatBytes.U - baseAddrIn(shiftWidth-1, 0)
                 bytesLeftR  := sizeBytes
                 nextAddrR   := baseAddrIn
@@ -406,7 +409,7 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
                 validR      := true.B
                 bytesReadR  := beatBytes.U
                 bytesLeftR  := bytesLeftR - bytesReadR
-                nextAddrR   := nextAddrR + beatBytes
+                nextAddrR   := nextAddrR + bytesReadR
                 when (bytesLeftR <= bytesReadR) {
                     stateR  := State.Init
                 }
@@ -417,31 +420,37 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     addrR    = Reg(UInt(addrWidth.W))
     shiftR   = Reg(UInt(shiftWidth.W))
     maskR    = Reg(UInt(beatBytes.W))
+    startR   = Reg(Bool())
     lastR    = Reg(Bool())
 
     addrR   := Cat(nextAddrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
     shiftR  := nextAddrR(shiftWidth-1, 0)
     maskR   := getMask(bytesLeftR)
+    startR  := nextStartR
     lastR   := bytesLeftR <= bytesReadR ? true.B : false.B
 
     valid2R  = RegInit(false.B)
     addr2R   = Reg(UInt(addrWidth.W))
     mask2R   = Reg(UInt(beatBytes.W))
+    shift2R  = Reg(UInt(shiftWidth.W))
     last2R   = Reg(Bool())
 
     valid2R := valid2R
     addr2R  := addrR
-    mask2R  := maskR << shiftR;
+    mask2R  := maskR << shiftR
+    shift2R := startR : shiftR ? shift2R
     last2R  := false.B
     
-    ctrlFifo.io.enq.bits    := Cat(last2R, mask2R, addr2R)
+    ctrlFifo.io.enq.bits    := Cat(last2R, shift2R, mask2R, addr2R)
     ctrlFifo.io.enq.valid   := valid2R
 
     val addrLo      = 0
     val addrHi      = addrLo + addrWidth - 1
     val maskLo      = addrHi + 1
     val maskHi      = maskLo + beatBytes - 1
-    val lastIdx     = maskHi + 1
+    val shiftLo     = maskHi + 1
+    val shiftHi     = shiftLo + shiftWidth - 1
+    val lastIdx     = shiftHi + 1
     
     byteFifoWrReady = WireInit(0.U(beatBytes.W))
     byteFifoRdValid = WireInit(0.U())
@@ -474,7 +483,9 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     lastOutR         = RegInit(false.B)
 
     wrEnOutR        := byteFifoRdReady
-    wrDataOutR      := byteFifoRdData.asUInt
+    wrDataOutR      := ((byteFifoRdData.asUInt << (8 * ctrlFifo.io.deq.bits(shiftHi, shiftLo))) |
+        (byteFifoRdData.asUInt >> (dataWidth - 8 * ctrlFifo.io.deq.bits(shiftHi, shiftLo))))
+        
     addrOutR        := ctrlFifo.io.deq.bits(maskHi, maskLo)
     lastOutR        := ctrlFifo.io.deq.bits(lastIdx)
     
