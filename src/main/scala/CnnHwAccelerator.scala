@@ -746,3 +746,36 @@ class CnnHwAccelerator(params: CnnHwAcceleratorParams, managerBeatBytes: Int, cl
         io.done := accClient.module.io.done
     }
 }
+
+trait CanHaveCnnHwAccelerator { this: BaseSubsystem =>
+    private val managerName = "cnn_hw_accelerator_manager"
+    private val clientName  = "cnn_hw_accelerator_client"
+    private val pbus = locateTLBusWrapper(PBUS)
+    private val fbus = locateTLBusWrapper(FBUS)
+    
+    val accelerator_done = p(DMAKey) match {
+        case Some(params) => {
+
+            val domain = pbus.generateSynchronousDomain.suggestName("cnn_hw_accelerator_domain")
+            val accelerator = domain{LazyModule(new CnnHwAccelerator(params, pbus.beatBytes, fbus.beatBytes)(p))}
+
+            pbus.coupleTo(managerName) { accelerator.manager := TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _ }
+            fbus.coupleFrom(clientName) { _ := accelerator.client }
+	    
+            val accelerator_done = domain{ InModuleBody {
+                val done = IO(Output(Bool())).suggestName("accelerator_done")
+                done := accelerator.module.io.done
+                done
+            } }
+
+            Some(accelerator_done)
+        }
+        case None => None
+    }
+}
+
+class WithCnnHwAccelerator extends Config((site, here, up) => {
+  case CnnHwAcceleratorKey => {
+    Some(CnnHwAcceleratorParams())
+  }
+})
