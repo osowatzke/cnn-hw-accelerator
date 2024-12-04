@@ -1,3 +1,14 @@
+package cnnHwAccelerator
+
+import chisel3._
+import chisel3.util._
+import org.chipsalliance.cde.config._
+import freechips.rocketchip.prci._
+import freechips.rocketchip.subsystem._
+import freechips.rocketchip.diplomacy._
+import freechips.rocketchip.tilelink._
+import freechips.rocketchip.regmapper._
+
 case class CnnHwAcceleratorParams (
     address: BigInt = 0x40000,
     vectorSize: Int = 8,
@@ -46,6 +57,279 @@ class CnnHwAcceleratorBlackBox(
         MAX_SIZE))
     
     addResource("/vsrc/cnn_hw_accelerator.v")
+}
+
+class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: Int) extends Module
+{
+    val sizeWidth  = log2Ceil(maxSize)
+    val elemBytes  = elemWidth / 8
+    val countWidth = sizeWidth + log2Ceil(elemBytes)
+    val dataWidth  = 8 * beatBytes
+    val shiftWidth = log2(ceil(beatBytes))
+
+    val io = IO(new Bundle{
+        val startIn      = Input(Bool())
+        val sizeIn       = Input(UInt(sizeWidth.W))
+        val sourceAddrIn = Input(UInt(addrWidth.W))
+        val lastOut      = Output(Bool())
+        val rdReadyIn    = Input(Bool())
+        val rdValidOut   = Output(Bool())
+        val rdEnOut      = Output(UInt(beatBytes.W))
+        val addrOut      = Output(UInt(addrWidth.W))
+    })
+
+    def getMask(bytesLeft : UInt) : UInt {
+        val mask = WireInit(0.U(beatBytes.W))
+        when (bytesLeft >= blockBytes.U) {
+            mask  := -1.S(beatBytes.W).asUInt
+        } .otherwise {
+            for (i <- 0 to (blockBytes-1)) {
+                when (bytesLeft(log2Ceil(beatBytes)-1, 0) > i.U)
+                {
+                    mask(i) := true.B
+                }
+            }
+        }
+        return mask
+    }
+
+    object State extends ChiselEnum
+    {
+        val Init, Read = Value
+    }
+
+    val sizeBytes    = WireInit(0.U(countWidth.W))
+    sizeBytes       := Cat(io.sizeIn, 0.U(log2Ceil(elemBytes).W))
+
+    validR           = RegInit(false.B)
+    stateR           = RegInit(State.Init)
+    shiftR           = Reg(UInt(sourceWidth.W))
+    bytesLeftR       = Reg(UInt(countWidth.W))
+    bytesReadR       = Reg(UInt((shiftWidth+1).W))
+    nextAddrR        = Reg(UInt(addrWidth.W))
+
+    validR          := false.B
+    switch (stateR) {
+        is (State.Init) {
+            when (io.startIn) {
+                shiftR          := io.sourceAddrIn(shiftWidth-1, 0)
+                bytesReadR      := beatBytes.U - io.sourceAddrIn(shiftWidth-1, 0)
+                bytesLeftR      := sizeBytes
+                nextAddrR       := io.sourceAddrIn
+                stateR          := State.Read
+            }
+        }
+        is (State.Read) {
+            when (io.rdReadyIn) {
+                validR          := true.B
+                bytesReadR      := beatBytes.U
+                bytesLeftR      := bytesLeftR - bytesReadR
+                nextAddrR       := nextAddrR + bytesReadR
+                when (bytesLeftR <= bytesReadR) {
+                    stateR      := State.Init
+                }
+            }
+        }
+    }
+
+    addrR    = Reg(UInt(addrWidth.W))
+    rdEnR    = Reg(UInt(beatBytes.W))
+    lastR    = Reg(Bool())
+
+    addrR   := nextAddr
+    rdEnR   := getMask(bytesLeftR)
+    lastR   := bytesLeft <= bytesReadR ? true.B : false.B
+
+    valid2R  = RegInit(false.B)
+    addr2R   = Reg(UInt(addrWidth.W))
+    rdEn2R   = Reg(UInt(beatBytes.W))
+    last2R   = Reg(Bool())
+
+    valid2R := validR
+    addr2R  := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
+    rdEn2R  := rdEnR << shiftR
+    last2R  := lastR
+
+    io.rdValidOut   := valid2R
+    io.rdEnOut      := rdEn2R
+    io.addrOut      := addr2R
+    io.lastOut      := last2R
+}
+
+class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: Int) extends Module
+{
+
+    val sizeWidth  = log2Ceil(maxSize)
+    val elemBytes  = elemWidth / 8
+    val countWidth = sizeWidth + log2Ceil(elemBytes)
+    val dataWidth  = 8 * beatBytes
+    val shiftWidth = log2(ceil(beatBytes))
+
+    val io = IO(new Bundle{
+        val startIn      = Input(Bool())
+        val sizeIn       = Input(UInt(sizeWidth.W))
+        val destAddrIn   = Input(UInt(addrWidth.W))
+        val sourceAddrIn = Input(UInt(addrWidth.W))
+        val wrValidIn    = Input(UInt(beatBytes.W))
+        val wrDataIn     = Input(UInt(dataWidth.W))
+        val wrReadyOut   = Output(Bool())        
+        val wrReadyIn    = Input(Bool())
+        val wrEnOut      = Output(UInt(beatBytes.W))
+        val wrDataOut    = Output(UInt(beatBytes.W))
+        val addrOut      = Output(UInt(addrWidth.W))
+        val lastOut      = Output(Bool())
+    })
+
+    def getMask(bytesLeft : UInt) : UInt {
+        val mask = WireInit(0.U(beatBytes.W))
+        when (bytesLeft >= blockBytes.U) {
+            mask  := -1.S(beatBytes.W).asUInt
+        } .otherwise {
+            for (i <- 0 to (blockBytes-1)) {
+                when (bytesLeft(log2Ceil(beatBytes)-1, 0) > i.U)
+                {
+                    mask(i) := true.B
+                }
+            }
+        }
+        return mask
+    }
+
+    object State extends ChiselEnum
+    {
+        val Init, Read = Value
+    }
+
+    val sizeBytes    = WireInit(0.U(countWidth.W))
+    sizeBytes       := Cat(io.sizeIn, 0.U(log2Ceil(elemBytes).W))
+
+    val ctrlFifo     = Module(new Fifo(UInt((beatBytes+addrWidth+shiftWidth+1).W), 8, 3))
+
+    validR           = RegInit(false.B)
+    stateR           = RegInit(State.Init)
+    shiftR           = Reg(UInt(sourceWidth.W))
+    bytesLeftR       = Reg(UInt(countWidth.W))
+    bytesReadR       = Reg(UInt((shiftWidth+1).W))
+    nextAddrR        = Reg(UInt(addrWidth.W))
+
+    validR          := false.B
+    switch (stateR) {
+        is (State.Init) {
+            when (io.startIn) {
+                shiftR          := io.destAddrIn(shiftWidth-1, 0) - io.sourceAddrIn(shiftWidth-1, 0)
+                bytesReadR      := beatBytes.U - io.destAddrIn(shiftWidth-1, 0)
+                bytesLeftR      := sizeBytes
+                nextAddrR       := io.destAddrIn
+                stateR          := State.Read
+            }
+        }
+        is (State.Read) {
+            when (ctrlFifo.io.enq.ready) {
+                validR          := true.B
+                bytesReadR      := beatBytes.U
+                bytesLeftR      := bytesLeftR - bytesReadR
+                nextAddrR       := nextAddrR + bytesReadR
+                when (bytesLeftR <= bytesReadR) {
+                    stateR      := State.Init
+                }
+            }
+        }
+    }
+
+    addrR    = Reg(UInt(addrWidth.W))
+    maskR    = Reg(UInt(beatBytes.W))
+    lastR    = Reg(Bool())
+
+    addrR   := nextAddr
+    maskR   := getMask(bytesLeftR)
+    lastR   := bytesLeft <= bytesReadR ? true.B : false.B
+
+    valid2R  = RegInit(false.B)
+    addr2R   = Reg(UInt(addrWidth.W))
+    mask2R   = Reg(UInt(beatBytes.W))
+    shift2R  = Reg(UInt())
+    last2R   = Reg(Bool())
+
+    valid2R := validR
+    addr2R  := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
+    mask2R  := (maskR << addrR(shiftWidth-1, 0)) >> addrR(shiftWidth-1, 0)
+    shift2R := shiftR
+    last2R  := lastR
+
+    valid3R  = RegInit(false.B)
+    addr3R   = Reg(UInt(addrWidth.W))
+    mask3R   = Reg(UInt(beatBytes.W))
+    shift3R  = Reg(UInt())
+    last3R   = Reg(Bool())
+    
+    valid3R := valid2R
+    addr3R  := addr2R
+    mask3R  := (Cat(mask2R, mask2R) >> shift2R)(beatBytes-1, 0)
+    shift3R := shift2R
+    last3R  := last2R 
+
+    ctrlFifo.io.enq.bits    := Cat(last3R, shift3R, mask3R, addr3R)
+    ctrlFifo.io.enq.valid   := valid3R
+
+    val addrLo      = 0
+    val addrHi      = addrLo + addrWidth - 1
+    val maskLo      = addrHi + 1
+    val maskHi      = maskLo + beatBytes - 1
+    val shiftLo     = maskHi + 1
+    val shiftHi     = shiftLo + shiftWidth - 1
+    val lastIdx     = shiftHi + 1
+    
+    byteFifoWrReady = WireInit(0.U(beatBytes.W))
+    byteFifoRdValid = WireInit(0.U())
+    byteFifoRdData  = WireInit(Seq.fill(blockBytes)(0.U(8.W)))
+
+    for (i <- 0 to (blockBytes-1)) {
+        val byteFifo             = Module(new Fifo(UInt(8.W), 8, 2))
+        byteFifo.io.enq.valid   := io.wrValidIn(i)
+        byteFifo.io.enq.bits    := (io.wrDataIn >> (8 * i))(7, 0)
+        byteFifoWrReady(i)      := byteFifo.io.enq.valid
+        byteFifo.io.deq.ready   := byteFifoRdReady(i) 
+        byteFifoRdValid(i)      := byteFifo.io.deq.valid
+        byteFifoRdData(i)       := byteFifo.io.deq.bits
+    }
+    
+    wrReadyR         = RegInit(false.B)
+    wrReadyR        := (byteFifoWrReady === -1.S(beatBytes).asUInt)
+
+    io.wrReadyOut   := wrReadyR
+
+    rdReady          = WireInit(false.B)
+    rdReady         := wrReadyIn & ctrlFifo.io.deq.valid & (ctrlFifo.io.deq.bits === byteFifoRdValid)
+
+    byteFifoRdReady  = WireInit(false.B)
+    byteFifoRdReady := rdReady ? ctrlFifo.io.deq.bits(maskHi, maskLo) : 0.U
+
+    wrEnOutR         = RegInit(0.U(beatBytes.W))
+    wrDataOutR       = Reg(UInt(dataWidth.W))
+    addrOutR         = Reg(UInt(addrWidth.W))
+    shiftOutR        = Reg(UInt(shiftWidth.W))
+    lastOutR         = RegInit(false.B)
+
+    wrEnOutR        := byteFifoRdReady
+    wrDataOutR      := byteFifoRdData.asUInt
+    addrOutR        := ctrlFifo.io.deq.bits(addrHi, addrLo)
+    shiftOutR       := ctrlFifo.io.deq.bits(shiftHi, shiftLo)
+    lastOutR        := ctrlFifo.io.deq.bits(lastIdx)
+
+    wrEnOut2R        = RegInit(0.U(beatBytes.W))
+    wrDataOut2R      = Reg(UInt(dataWidth.W))
+    addrOut2R        = Reg(UInt(addrWidth.W))
+    lastOut2R        = RegInit(false.B)
+
+    wrEnOut2R       := (Cat(wrEnOutR, wrEnOutR) >> shiftOutR)(beatBytes-1, 0)
+    wrDataOut2R     := (Cat(wrDataOutR, wrDataOutR) >> Cat(shiftOutR, 0.U(3.W)))(dataWidth-1, 0)
+    addrOut2R       := addrOutR
+    lastOut2R       := lastOutR
+    
+    wrEnOut         := wrEnOut2R
+    wrDataOut       := wrDataOut2R
+    addrOut         := addrOut2R
+    lastOut         := lastOut2R
 }
 
 class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(implicit p: Parameters) extends LazyModule
@@ -430,275 +714,3 @@ class CnnHwAcceleratorClient(beatBytes: Int)(implicit p: Parameters) extends Laz
     }
 }
 
-class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: Int) extends Module
-{
-    val sizeWidth  = log2Ceil(maxSize)
-    val elemBytes  = elemWidth / 8
-    val countWidth = sizeWidth + log2Ceil(elemBytes)
-    val dataWidth  = 8 * beatBytes
-    val shiftWidth = log2(ceil(beatBytes))
-
-    val io = IO(new Bundle{
-        val startIn      = Input(Bool())
-        val sizeIn       = Input(UInt(sizeWidth.W))
-        val sourceAddrIn = Input(UInt(addrWidth.W))
-        val lastOut      = Output(Bool())
-        val rdReadyIn    = Input(Bool())
-        val rdValidOut   = Output(Bool())
-        val rdEnOut      = Output(UInt(beatBytes.W))
-        val addrOut      = Output(UInt(addrWidth.W))
-    })
-
-    def getMask(bytesLeft : UInt) : UInt {
-        val mask = WireInit(0.U(beatBytes.W))
-        when (bytesLeft >= blockBytes.U) {
-            mask  := -1.S(beatBytes.W).asUInt
-        } .otherwise {
-            for (i <- 0 to (blockBytes-1)) {
-                when (bytesLeft(log2Ceil(beatBytes)-1, 0) > i.U)
-                {
-                    mask(i) := true.B
-                }
-            }
-        }
-        return mask
-    }
-
-    object State extends ChiselEnum
-    {
-        val Init, Read = Value
-    }
-
-    val sizeBytes    = WireInit(0.U(countWidth.W))
-    sizeBytes       := Cat(io.sizeIn, 0.U(log2Ceil(elemBytes).W))
-
-    validR           = RegInit(false.B)
-    stateR           = RegInit(State.Init)
-    shiftR           = Reg(UInt(sourceWidth.W))
-    bytesLeftR       = Reg(UInt(countWidth.W))
-    bytesReadR       = Reg(UInt((shiftWidth+1).W))
-    nextAddrR        = Reg(UInt(addrWidth.W))
-
-    validR          := false.B
-    switch (stateR) {
-        is (State.Init) {
-            when (io.startIn) {
-                shiftR          := io.sourceAddrIn(shiftWidth-1, 0)
-                bytesReadR      := beatBytes.U - io.sourceAddrIn(shiftWidth-1, 0)
-                bytesLeftR      := sizeBytes
-                nextAddrR       := io.sourceAddrIn
-                stateR          := State.Read
-            }
-        }
-        is (State.Read) {
-            when (io.rdReadyIn) {
-                validR          := true.B
-                bytesReadR      := beatBytes.U
-                bytesLeftR      := bytesLeftR - bytesReadR
-                nextAddrR       := nextAddrR + bytesReadR
-                when (bytesLeftR <= bytesReadR) {
-                    stateR      := State.Init
-                }
-            }
-        }
-    }
-
-    addrR    = Reg(UInt(addrWidth.W))
-    rdEnR    = Reg(UInt(beatBytes.W))
-    lastR    = Reg(Bool())
-
-    addrR   := nextAddr
-    rdEnR   := getMask(bytesLeftR)
-    lastR   := bytesLeft <= bytesReadR ? true.B : false.B
-
-    valid2R  = RegInit(false.B)
-    addr2R   = Reg(UInt(addrWidth.W))
-    rdEn2R   = Reg(UInt(beatBytes.W))
-    last2R   = Reg(Bool())
-
-    valid2R := validR
-    addr2R  := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
-    rdEn2R  := rdEnR << shiftR
-    last2R  := lastR
-
-    io.rdValidOut   := valid2R
-    io.rdEnOut      := rdEn2R
-    io.addrOut      := addr2R
-    io.lastOut      := last2R
-}
-
-class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: Int) extends Module
-{
-
-    val sizeWidth  = log2Ceil(maxSize)
-    val elemBytes  = elemWidth / 8
-    val countWidth = sizeWidth + log2Ceil(elemBytes)
-    val dataWidth  = 8 * beatBytes
-    val shiftWidth = log2(ceil(beatBytes))
-
-    val io = IO(new Bundle{
-        val startIn      = Input(Bool())
-        val sizeIn       = Input(UInt(sizeWidth.W))
-        val destAddrIn   = Input(UInt(addrWidth.W))
-        val sourceAddrIn = Input(UInt(addrWidth.W))
-        val wrValidIn    = Input(UInt(beatBytes.W))
-        val wrDataIn     = Input(UInt(dataWidth.W))
-        val wrReadyOut   = Output(Bool())        
-        val wrReadyIn    = Input(Bool())
-        val wrEnOut      = Output(UInt(beatBytes.W))
-        val wrDataOut    = Output(UInt(beatBytes.W))
-        val addrOut      = Output(UInt(addrWidth.W))
-        val lastOut      = Output(Bool())
-    })
-
-    def getMask(bytesLeft : UInt) : UInt {
-        val mask = WireInit(0.U(beatBytes.W))
-        when (bytesLeft >= blockBytes.U) {
-            mask  := -1.S(beatBytes.W).asUInt
-        } .otherwise {
-            for (i <- 0 to (blockBytes-1)) {
-                when (bytesLeft(log2Ceil(beatBytes)-1, 0) > i.U)
-                {
-                    mask(i) := true.B
-                }
-            }
-        }
-        return mask
-    }
-
-    object State extends ChiselEnum
-    {
-        val Init, Read = Value
-    }
-
-    val sizeBytes    = WireInit(0.U(countWidth.W))
-    sizeBytes       := Cat(io.sizeIn, 0.U(log2Ceil(elemBytes).W))
-
-    val ctrlFifo     = Module(new Fifo(UInt((beatBytes+addrWidth+shiftWidth+1).W), 8, 3))
-
-    validR           = RegInit(false.B)
-    stateR           = RegInit(State.Init)
-    shiftR           = Reg(UInt(sourceWidth.W))
-    bytesLeftR       = Reg(UInt(countWidth.W))
-    bytesReadR       = Reg(UInt((shiftWidth+1).W))
-    nextAddrR        = Reg(UInt(addrWidth.W))
-
-    validR          := false.B
-    switch (stateR) {
-        is (State.Init) {
-            when (io.startIn) {
-                shiftR          := io.destAddrIn(shiftWidth-1, 0) - io.sourceAddrIn(shiftWidth-1, 0)
-                bytesReadR      := beatBytes.U - io.destAddrIn(shiftWidth-1, 0)
-                bytesLeftR      := sizeBytes
-                nextAddrR       := io.destAddrIn
-                stateR          := State.Read
-            }
-        }
-        is (State.Read) {
-            when (ctrlFifo.io.enq.ready) {
-                validR          := true.B
-                bytesReadR      := beatBytes.U
-                bytesLeftR      := bytesLeftR - bytesReadR
-                nextAddrR       := nextAddrR + bytesReadR
-                when (bytesLeftR <= bytesReadR) {
-                    stateR      := State.Init
-                }
-            }
-        }
-    }
-
-    addrR    = Reg(UInt(addrWidth.W))
-    maskR    = Reg(UInt(beatBytes.W))
-    lastR    = Reg(Bool())
-
-    addrR   := nextAddr
-    maskR   := getMask(bytesLeftR)
-    lastR   := bytesLeft <= bytesReadR ? true.B : false.B
-
-    valid2R  = RegInit(false.B)
-    addr2R   = Reg(UInt(addrWidth.W))
-    mask2R   = Reg(UInt(beatBytes.W))
-    shift2R  = Reg(UInt())
-    last2R   = Reg(Bool())
-
-    valid2R := validR
-    addr2R  := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
-    mask2R  := (maskR << addrR(shiftWidth-1, 0)) >> addrR(shiftWidth-1, 0)
-    shift2R := shiftR
-    last2R  := lastR
-
-    valid3R  = RegInit(false.B)
-    addr3R   = Reg(UInt(addrWidth.W))
-    mask3R   = Reg(UInt(beatBytes.W))
-    shift3R  = Reg(UInt())
-    last3R   = Reg(Bool())
-    
-    valid3R := valid2R
-    addr3R  := addr2R
-    mask3R  := (Cat(mask2R, mask2R) >> shift2R)(beatBytes-1, 0)
-    shift3R := shift2R
-    last3R  := last2R 
-
-    ctrlFifo.io.enq.bits    := Cat(last3R, shift3R, mask3R, addr3R)
-    ctrlFifo.io.enq.valid   := valid3R
-
-    val addrLo      = 0
-    val addrHi      = addrLo + addrWidth - 1
-    val maskLo      = addrHi + 1
-    val maskHi      = maskLo + beatBytes - 1
-    val shiftLo     = maskHi + 1
-    val shiftHi     = shiftLo + shiftWidth - 1
-    val lastIdx     = shiftHi + 1
-    
-    byteFifoWrReady = WireInit(0.U(beatBytes.W))
-    byteFifoRdValid = WireInit(0.U())
-    byteFifoRdData  = WireInit(Seq.fill(blockBytes)(0.U(8.W)))
-
-    for (i <- 0 to (blockBytes-1)) {
-        val byteFifo             = Module(new Fifo(UInt(8.W), 8, 2))
-        byteFifo.io.enq.valid   := io.wrValidIn(i)
-        byteFifo.io.enq.bits    := (io.wrDataIn >> (8 * i))(7, 0)
-        byteFifoWrReady(i)      := byteFifo.io.enq.valid
-        byteFifo.io.deq.ready   := byteFifoRdReady(i) 
-        byteFifoRdValid(i)      := byteFifo.io.deq.valid
-        byteFifoRdData(i)       := byteFifo.io.deq.bits
-    }
-    
-    wrReadyR         = RegInit(false.B)
-    wrReadyR        := (byteFifoWrReady === -1.S(beatBytes).asUInt)
-
-    io.wrReadyOut   := wrReadyR
-
-    rdReady          = WireInit(false.B)
-    rdReady         := wrReadyIn & ctrlFifo.io.deq.valid & (ctrlFifo.io.deq.bits === byteFifoRdValid)
-
-    byteFifoRdReady  = WireInit(false.B)
-    byteFifoRdReady := rdReady ? ctrlFifo.io.deq.bits(maskHi, maskLo) : 0.U
-
-    wrEnOutR         = RegInit(0.U(beatBytes.W))
-    wrDataOutR       = Reg(UInt(dataWidth.W))
-    addrOutR         = Reg(UInt(addrWidth.W))
-    shiftOutR        = Reg(UInt(shiftWidth.W))
-    lastOutR         = RegInit(false.B)
-
-    wrEnOutR        := byteFifoRdReady
-    wrDataOutR      := byteFifoRdData.asUInt
-    addrOutR        := ctrlFifo.io.deq.bits(addrHi, addrLo)
-    shiftOutR       := ctrlFifo.io.deq.bits(shiftHi, shiftLo)
-    lastOutR        := ctrlFifo.io.deq.bits(lastIdx)
-
-    wrEnOut2R        = RegInit(0.U(beatBytes.W))
-    wrDataOut2R      = Reg(UInt(dataWidth.W))
-    addrOut2R        = Reg(UInt(addrWidth.W))
-    lastOut2R        = RegInit(false.B)
-
-    wrEnOut2R       := (Cat(wrEnOutR, wrEnOutR) >> shiftOutR)(beatBytes-1, 0)
-    wrDataOut2R     := (Cat(wrDataOutR, wrDataOutR) >> Cat(shiftOutR, 0.U(3.W)))(dataWidth-1, 0)
-    addrOut2R       := addrOutR
-    lastOut2R       := lastOutR
-    
-    wrEnOut         := wrEnOut2R
-    wrDataOut       := wrDataOut2R
-    addrOut         := addrOut2R
-    lastOut         := lastOut2R
-}
