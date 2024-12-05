@@ -2,6 +2,7 @@ package cnnHwAccelerator
 
 import chisel3._
 import chisel3.util._
+import chisel3.experimental._
 import org.chipsalliance.cde.config._
 import freechips.rocketchip.prci._
 import freechips.rocketchip.subsystem._
@@ -65,7 +66,7 @@ class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: In
     val elemBytes  = elemWidth / 8
     val countWidth = sizeWidth + log2Ceil(elemBytes)
     val dataWidth  = 8 * beatBytes
-    val shiftWidth = log2(ceil(beatBytes))
+    val shiftWidth = log2Ceil(beatBytes)
 
     val io = IO(new Bundle{
         val startIn      = Input(Bool())
@@ -78,12 +79,12 @@ class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: In
         val addrOut      = Output(UInt(addrWidth.W))
     })
 
-    def getMask(bytesLeft : UInt) : UInt {
+    def getMask(bytesLeft : UInt) : UInt = {
         val mask = WireInit(0.U(beatBytes.W))
-        when (bytesLeft >= blockBytes.U) {
+        when (bytesLeft >= beatBytes.U) {
             mask  := -1.S(beatBytes.W).asUInt
         } .otherwise {
-            for (i <- 0 to (blockBytes-1)) {
+            for (i<-0 to (beatBytes-1)) {
                 when (bytesLeft(log2Ceil(beatBytes)-1, 0) > i.U)
                 {
                     mask(i) := true.B
@@ -101,14 +102,16 @@ class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: In
     val sizeBytes    = WireInit(0.U(countWidth.W))
     sizeBytes       := Cat(io.sizeIn, 0.U(log2Ceil(elemBytes).W))
 
-    validR           = RegInit(false.B)
-    stateR           = RegInit(State.Init)
-    shiftR           = Reg(UInt(sourceWidth.W))
-    bytesLeftR       = Reg(UInt(countWidth.W))
-    bytesReadR       = Reg(UInt((shiftWidth+1).W))
-    nextAddrR        = Reg(UInt(addrWidth.W))
+    val validR       = RegInit(false.B)
+    val lastR        = RegInit(false.B)
+    val stateR       = RegInit(State.Init)
+    val shiftR       = Reg(UInt(shiftWidth.W))
+    val bytesLeftR   = Reg(UInt(countWidth.W))
+    val bytesReadR   = Reg(UInt((shiftWidth+1).W))
+    val nextAddrR    = Reg(UInt(addrWidth.W))
 
     validR          := false.B
+    lastR           := false.B
     switch (stateR) {
         is (State.Init) {
             when (io.startIn) {
@@ -126,29 +129,28 @@ class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: In
                 bytesLeftR      := bytesLeftR - bytesReadR
                 nextAddrR       := nextAddrR + bytesReadR
                 when (bytesLeftR <= bytesReadR) {
+                    lastR       := true.B
                     stateR      := State.Init
                 }
             }
         }
     }
 
-    addrR    = Reg(UInt(addrWidth.W))
-    rdEnR    = Reg(UInt(beatBytes.W))
-    lastR    = Reg(Bool())
+    val addrR        = Reg(UInt(addrWidth.W))
+    val rdEnR        = Reg(UInt(beatBytes.W))
 
-    addrR   := nextAddr
-    rdEnR   := getMask(bytesLeftR)
-    lastR   := bytesLeft <= bytesReadR ? true.B : false.B
+    addrR           := nextAddrR
+    rdEnR           := getMask(bytesLeftR)
 
-    valid2R  = RegInit(false.B)
-    addr2R   = Reg(UInt(addrWidth.W))
-    rdEn2R   = Reg(UInt(beatBytes.W))
-    last2R   = Reg(Bool())
+    val valid2R      = RegInit(false.B)
+    val last2R       = RegInit(false.B)
+    val addr2R       = Reg(UInt(addrWidth.W))
+    val rdEn2R       = Reg(UInt(beatBytes.W))
 
-    valid2R := validR
-    addr2R  := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
-    rdEn2R  := rdEnR << shiftR
-    last2R  := lastR
+    valid2R         := validR
+    addr2R          := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
+    rdEn2R          := rdEnR << shiftR
+    last2R          := lastR
 
     io.rdValidOut   := valid2R
     io.rdEnOut      := rdEn2R
@@ -163,7 +165,7 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     val elemBytes  = elemWidth / 8
     val countWidth = sizeWidth + log2Ceil(elemBytes)
     val dataWidth  = 8 * beatBytes
-    val shiftWidth = log2(ceil(beatBytes))
+    val shiftWidth = log2Ceil(beatBytes)
 
     val io = IO(new Bundle{
         val startIn      = Input(Bool())
@@ -180,12 +182,12 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
         val lastOut      = Output(Bool())
     })
 
-    def getMask(bytesLeft : UInt) : UInt {
+    def getMask(bytesLeft : UInt) : UInt = {
         val mask = WireInit(0.U(beatBytes.W))
-        when (bytesLeft >= blockBytes.U) {
+        when (bytesLeft >= beatBytes.U) {
             mask  := -1.S(beatBytes.W).asUInt
         } .otherwise {
-            for (i <- 0 to (blockBytes-1)) {
+            for (i<-0 to (beatBytes-1)) {
                 when (bytesLeft(log2Ceil(beatBytes)-1, 0) > i.U)
                 {
                     mask(i) := true.B
@@ -205,14 +207,16 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
 
     val ctrlFifo     = Module(new Fifo(UInt((beatBytes+addrWidth+shiftWidth+1).W), 8, 3))
 
-    validR           = RegInit(false.B)
-    stateR           = RegInit(State.Init)
-    shiftR           = Reg(UInt(sourceWidth.W))
-    bytesLeftR       = Reg(UInt(countWidth.W))
-    bytesReadR       = Reg(UInt((shiftWidth+1).W))
-    nextAddrR        = Reg(UInt(addrWidth.W))
+    val validR       = RegInit(false.B)
+    val lastR        = RegInit(false.B)
+    val stateR       = RegInit(State.Init)
+    val shiftR       = Reg(UInt(shiftWidth.W))
+    val bytesLeftR   = Reg(UInt(countWidth.W))
+    val bytesReadR   = Reg(UInt((shiftWidth+1).W))
+    val nextAddrR    = Reg(UInt(addrWidth.W))
 
     validR          := false.B
+    lastR           := false.B
     switch (stateR) {
         is (State.Init) {
             when (io.startIn) {
@@ -236,37 +240,35 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
         }
     }
 
-    addrR    = Reg(UInt(addrWidth.W))
-    maskR    = Reg(UInt(beatBytes.W))
-    lastR    = Reg(Bool())
+    val addrR    = Reg(UInt(addrWidth.W))
+    val maskR    = Reg(UInt(beatBytes.W))
 
-    addrR   := nextAddr
-    maskR   := getMask(bytesLeftR)
-    lastR   := bytesLeft <= bytesReadR ? true.B : false.B
+    addrR       := nextAddrR
+    maskR       := getMask(bytesLeftR)
 
-    valid2R  = RegInit(false.B)
-    addr2R   = Reg(UInt(addrWidth.W))
-    mask2R   = Reg(UInt(beatBytes.W))
-    shift2R  = Reg(UInt())
-    last2R   = Reg(Bool())
+    val valid2R  = RegInit(false.B)
+    val last2R   = RegInit(false.B)
+    val addr2R   = Reg(UInt(addrWidth.W))
+    val mask2R   = Reg(UInt(beatBytes.W))
+    val shift2R  = Reg(UInt())
 
-    valid2R := validR
-    addr2R  := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
-    mask2R  := (maskR << addrR(shiftWidth-1, 0)) >> addrR(shiftWidth-1, 0)
-    shift2R := shiftR
-    last2R  := lastR
+    valid2R     := validR
+    addr2R      := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
+    mask2R      := (maskR << addrR(shiftWidth-1, 0)) >> addrR(shiftWidth-1, 0)
+    shift2R     := shiftR
+    last2R      := lastR
 
-    valid3R  = RegInit(false.B)
-    addr3R   = Reg(UInt(addrWidth.W))
-    mask3R   = Reg(UInt(beatBytes.W))
-    shift3R  = Reg(UInt())
-    last3R   = Reg(Bool())
+    val valid3R  = RegInit(false.B)
+    val addr3R   = Reg(UInt(addrWidth.W))
+    val mask3R   = Reg(UInt(beatBytes.W))
+    val shift3R  = Reg(UInt())
+    val last3R   = Reg(Bool())
     
-    valid3R := valid2R
-    addr3R  := addr2R
-    mask3R  := (Cat(mask2R, mask2R) >> shift2R)(beatBytes-1, 0)
-    shift3R := shift2R
-    last3R  := last2R 
+    valid3R     := valid2R
+    addr3R      := addr2R
+    mask3R      := (Cat(mask2R, mask2R) >> shift2R)(beatBytes-1, 0)
+    shift3R     := shift2R
+    last3R      := last2R 
 
     ctrlFifo.io.enq.bits    := Cat(last3R, shift3R, mask3R, addr3R)
     ctrlFifo.io.enq.valid   := valid3R
@@ -279,11 +281,12 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     val shiftHi     = shiftLo + shiftWidth - 1
     val lastIdx     = shiftHi + 1
     
-    byteFifoWrReady = WireInit(0.U(beatBytes.W))
-    byteFifoRdValid = WireInit(0.U())
-    byteFifoRdData  = WireInit(Seq.fill(blockBytes)(0.U(8.W)))
+    val byteFifoWrReady = WireInit(0.U(beatBytes.W))
+    val byteFifoRdReady = WireInit(0.U(beatBytes.W))
+    val byteFifoRdValid = WireInit(0.U(beatBytes.W))
+    val byteFifoRdData  = VecInit(Seq.fill(beatBytes)(0.U(8.W)))
 
-    for (i <- 0 to (blockBytes-1)) {
+    for (i <- 0 to (beatBytes-1)) {
         val byteFifo             = Module(new Fifo(UInt(8.W), 8, 2))
         byteFifo.io.enq.valid   := io.wrValidIn(i)
         byteFifo.io.enq.bits    := (io.wrDataIn >> (8 * i))(7, 0)
@@ -293,43 +296,44 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
         byteFifoRdData(i)       := byteFifo.io.deq.bits
     }
     
-    wrReadyR         = RegInit(false.B)
-    wrReadyR        := (byteFifoWrReady === -1.S(beatBytes).asUInt)
+    val wrReadyR     = RegInit(false.B)
+    wrReadyR        := (byteFifoWrReady === -1.S(beatBytes.W).asUInt)
 
     io.wrReadyOut   := wrReadyR
 
-    rdReady          = WireInit(false.B)
-    rdReady         := wrReadyIn & ctrlFifo.io.deq.valid & (ctrlFifo.io.deq.bits === byteFifoRdValid)
+    val rdReady      = WireInit(false.B)
+    rdReady         := io.wrReadyIn & ctrlFifo.io.deq.valid & (ctrlFifo.io.deq.bits === byteFifoRdValid)
 
-    byteFifoRdReady  = WireInit(false.B)
-    byteFifoRdReady := rdReady ? ctrlFifo.io.deq.bits(maskHi, maskLo) : 0.U
+    when (rdReady) {
+        byteFifoRdReady := ctrlFifo.io.deq.bits(maskHi, maskLo)
+    }
 
-    wrEnOutR         = RegInit(0.U(beatBytes.W))
-    wrDataOutR       = Reg(UInt(dataWidth.W))
-    addrOutR         = Reg(UInt(addrWidth.W))
-    shiftOutR        = Reg(UInt(shiftWidth.W))
-    lastOutR         = RegInit(false.B)
+    val wrEnOutR         = RegInit(0.U(beatBytes.W))
+    val wrDataOutR       = Reg(UInt(dataWidth.W))
+    val addrOutR         = Reg(UInt(addrWidth.W))
+    val shiftOutR        = Reg(UInt(shiftWidth.W))
+    val lastOutR         = RegInit(false.B)
 
-    wrEnOutR        := byteFifoRdReady
-    wrDataOutR      := byteFifoRdData.asUInt
-    addrOutR        := ctrlFifo.io.deq.bits(addrHi, addrLo)
-    shiftOutR       := ctrlFifo.io.deq.bits(shiftHi, shiftLo)
-    lastOutR        := ctrlFifo.io.deq.bits(lastIdx)
+    wrEnOutR            := byteFifoRdReady
+    wrDataOutR          := byteFifoRdData.asUInt
+    addrOutR            := ctrlFifo.io.deq.bits(addrHi, addrLo)
+    shiftOutR           := ctrlFifo.io.deq.bits(shiftHi, shiftLo)
+    lastOutR            := ctrlFifo.io.deq.bits(lastIdx)
 
-    wrEnOut2R        = RegInit(0.U(beatBytes.W))
-    wrDataOut2R      = Reg(UInt(dataWidth.W))
-    addrOut2R        = Reg(UInt(addrWidth.W))
-    lastOut2R        = RegInit(false.B)
+    val wrEnOut2R        = RegInit(0.U(beatBytes.W))
+    val wrDataOut2R      = Reg(UInt(dataWidth.W))
+    val addrOut2R        = Reg(UInt(addrWidth.W))
+    val lastOut2R        = RegInit(false.B)
 
-    wrEnOut2R       := (Cat(wrEnOutR, wrEnOutR) >> shiftOutR)(beatBytes-1, 0)
-    wrDataOut2R     := (Cat(wrDataOutR, wrDataOutR) >> Cat(shiftOutR, 0.U(3.W)))(dataWidth-1, 0)
-    addrOut2R       := addrOutR
-    lastOut2R       := lastOutR
+    wrEnOut2R           := (Cat(wrEnOutR, wrEnOutR) >> shiftOutR)(beatBytes-1, 0)
+    wrDataOut2R         := (Cat(wrDataOutR, wrDataOutR) >> Cat(shiftOutR, 0.U(3.W)))(dataWidth-1, 0)
+    addrOut2R           := addrOutR
+    lastOut2R           := lastOutR
     
-    wrEnOut         := wrEnOut2R
-    wrDataOut       := wrDataOut2R
-    addrOut         := addrOut2R
-    lastOut         := lastOut2R
+    io.wrEnOut          := wrEnOut2R
+    io.wrDataOut        := wrDataOut2R
+    io.addrOut          := addrOut2R
+    io.lastOut          := lastOut2R
 }
 
 class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(implicit p: Parameters) extends LazyModule
@@ -345,14 +349,14 @@ class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(im
     class Impl extends LazyModuleImp(this)
     {
         val io = IO(new Bundle {
-            val dataAddr   = Output(UInt(64.W))
-            val dataCols   = Output(UInt(32.W))
-            val dataRows   = Output(UInt(32.W))
-            val filtAddr   = Output(UInt(64.W))
-            val filtCols   = Output(UInt(32.W))
-            val filtRows   = Output(UInt(32.W))
-            val destAddr   = Output(UInt(64.W))
-            val start      = Output(Bool())
+            val dataAddrOut   = Output(UInt(64.W))
+            val dataColsOut   = Output(UInt(32.W))
+            val dataRowsOut   = Output(UInt(32.W))
+            val filtAddrOut   = Output(UInt(64.W))
+            val filtColsOut   = Output(UInt(32.W))
+            val filtRowsOut   = Output(UInt(32.W))
+            val destAddrOut   = Output(UInt(64.W))
+            val startOut      = Output(Bool())
         })
 
         val dataAddr   = RegInit(0.U(64.W))
@@ -375,14 +379,14 @@ class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(im
             0x20 -> Seq(RegField(64, destAddr)),
             0x28 -> Seq(RegField.w(1, start)))
 
-        io.dataAddr   := dataAddr
-        io.dataCols   := dataCols
-        io.dataRows   := dataRows
-        io.filtAddr   := filtAddr
-        io.filtCols   := filtCols
-        io.filtRows   := filtRows
-        io.destAddr   := destAddr
-        io.start      := start.bits && start.valid
+        io.dataAddrOut  := dataAddr
+        io.dataColsOut  := dataCols
+        io.dataRowsOut  := dataRows
+        io.filtAddrOut  := filtAddr
+        io.filtColsOut  := filtCols
+        io.filtRowsOut  := filtRows
+        io.destAddrOut  := destAddr
+        io.startOut     := start.bits && start.valid
     }
 }
 
@@ -398,15 +402,15 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
     {
         
         val io = IO(new Bundle {
-            val dataAddr   = Input(UInt(64.W))
-            val dataCols   = Input(UInt(32.W))
-            val dataRows   = Input(UInt(32.W))
-            val filtAddr   = Input(UInt(64.W))
-            val filtCols   = Input(UInt(32.W))
-            val filtRows   = Input(UInt(32.W))
-            val destAddr   = Input(UInt(64.W))
-            val start      = Input(Bool())
-            val done       = Output(Bool())
+            val dataAddrIn = Input(UInt(64.W))
+            val dataColsIn = Input(UInt(32.W))
+            val dataRowsIn = Input(UInt(32.W))
+            val filtAddrIn = Input(UInt(64.W))
+            val filtColsIn = Input(UInt(32.W))
+            val filtRowsIn = Input(UInt(32.W))
+            val destAddrIn = Input(UInt(64.W))
+            val startIn    = Input(Bool())
+            val doneOut    = Output(Bool())
         })
 
         val (tl, edge) = node.out(0)
@@ -419,10 +423,9 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         val dataWidth   = 32
         val dataBytes   = dataWidth/8
         val dimWidth    = log2Ceil(params.maxSize) + 1
-        val countWidth  = dimWidth + log2Ceil(dataBytes)
+        val addrWidth   = log2Ceil(params.maxSize) + log2Ceil(dataBytes)
+        val countWidth  = addrWidth + 1 
         val shiftWidth  = log2Ceil(beatBytes/dataBytes)
-        val accumWrEnHi = -1.S(dataBytes.W).asUInt
-        val accumWrEnLo = 0.U(dataBytes.W)
 
         // Read FIFO Configuration
         val rdFifoEnLo   = 0
@@ -437,7 +440,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         val wrFifoEnLo    = wrFifoDataHi + 1
         val wrFifoEnHi    = wrFifoEnLo + beatBytes - 1
         val wrFifoAddrLo  = wrFifoEnHi + 1
-        val wrFifoAddrHi  = wrFifoAddrLo + addrWidth - 1
+        val wrFifoAddrHi  = wrFifoAddrLo + busAddrWidth - 1
         val wrFifoLastIdx = wrFifoAddrHi + 1
         val wrFifoWidth   = wrFifoLastIdx + 1
 
@@ -470,7 +473,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         val rdCtrlStartR = RegInit(false.B)
         val rdCtrlValidR = Reg(UInt(2.W))
         val rdCtrlAddrR  = Reg(Vec(2, UInt(busAddrWidth.W)))
-        val rdCtrlSizeR  = Reg(Vec(2, UInt(coutnWidth.W)))
+        val rdCtrlSizeR  = Reg(Vec(2, UInt(countWidth.W)))
 
         // Read Alignment
         val rdAlignStartR  = RegInit(false.B)
@@ -504,8 +507,9 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         val tl_a_bitsR     = Reg(tl.a.bits.cloneType)
         val tl_a_validR    = RegInit(false.B)
         val tl_d_readyR    = RegInit(false.B)
-        val tl_d_validR    = RegInit(false.B)
+        val tl_d_validR    = Reg(UInt(beatBytes.W))
         val tl_d_dataR     = Reg(UInt(busDataWidth.W))
+        val tl_d_maskR     = Reg(UInt(beatBytes.W))
         val tl_d_lastR     = Reg(Bool())
         
         val wrFifoReadyR   = RegInit(false.B)
@@ -543,7 +547,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         start2R         := startR
         dataSize2R      := dataSizeR
         filtSize2R      := filtSizeR
-        resultSize2R    := Cat(io.resultColsR * io.resultRowsR, 0.U(log2Ceil(dataBytes).W))
+        resultSize2R    := Cat(resultColsR * resultRowsR, 0.U(log2Ceil(dataBytes).W))
         dataAddr2R      := dataAddrR
         filtAddr2R      := filtAddrR
         destAddr2R      := destAddrR
@@ -557,10 +561,10 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
             rdCtrlAddrR(1)      := filtAddr2R
             rdCtrlSizeR(0)      := dataSize2R
             rdCtrlSizeR(1)      := filtSize2R
-        .elsewhen (readCtrl.io.lastOut) {
+        } .elsewhen (readCtrl.io.lastOut) {
             rdCtrlValidR        := rdCtrlValidR >> 1
             rdCtrlAddrR(0)      := rdCtrlAddrR(1)
-            rdCtlrSizeR(0)      := rdCtrlSizeR(1)
+            rdCtrlSizeR(0)      := rdCtrlSizeR(1)
             when (rdCtrlValidR(1)) {
                 rdCtrlStartR    := true.B
             }
@@ -568,9 +572,9 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
 
         // Read Controller Connections
         // Configuration Pipeline
-        readCtrl.io.startIn         := readStartR
-        readCtrl.io.sizeIn          := readSizeR(0)
-        readCtrl.io.sourceAddrIn    := readAddrR(0)
+        readCtrl.io.startIn         := rdCtrlStartR
+        readCtrl.io.sizeIn          := rdCtrlSizeR(0)
+        readCtrl.io.sourceAddrIn    := rdCtrlAddrR(0)
 
         // Read FIFO
         readCtrl.io.rdReadyIn       := readFifo.io.enq.ready
@@ -588,9 +592,9 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
             rdAlignSizeR(1)         := filtSize2R
         } .elsewhen (readAlign.io.lastOut) {
             rdAlignValidR           := rdAlignValidR >> 1.U
-            rdAlignSourcR(0)        := rdAlignSourceR(1)
+            rdAlignSourceR(0)       := rdAlignSourceR(1)
             rdAlignSizeR(0)         := rdAlignSizeR(1)
-            when (rdAlignValidR(1))  
+            when (rdAlignValidR(1)) { 
                 rdAlignStartR       := true.B
             }
         }
@@ -599,7 +603,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         readAlign.io.startIn        := rdAlignStartR
         readAlign.io.sizeIn         := rdAlignSizeR(0)
         readAlign.io.destAddrIn     := Cat(!rdAlignValidR(1), 0.U((addrWidth-1).W))
-        readAlign.io.sourcAddrIn    := rdAlignSourceR(0)
+        readAlign.io.sourceAddrIn   := rdAlignSourceR(0)
 
         // Connect Bus to Read Alignment Buffer
         readAlign.io.wrValidIn      := tl_d_validR
@@ -639,30 +643,35 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         accelerator.io.addrIn       := readAlign.io.addrOut
 
         // Sink Connections
-        accWrValid                  := accelerator.io.validOut & wrAlign.io.rdReadyOut
+        accWrValid                  := accelerator.io.validOut & writeAlign.io.wrReadyOut
         when (io.startIn) {
             writeShiftR             := 0.U
-        } .elseWhen (accWrValid) {
+        } .elsewhen (accWrValid) {
             writeShiftR             := writeShiftR + 1.U
         }
-        
-        accWrEn                     := accWrValid ? accumWrEnHi : accumWrEnLo
+
+        when (accWrValid) {
+            accWrEn                 := -1.S(dataBytes.W).asUInt
+        } .otherwise {
+            accWrEn                 := 0.U(dataBytes.W)
+        }
+
         accWrData                   := accelerator.io.dataOut
 
         accWrEnR                    := Cat(0.U((beatBytes - dataBytes).W), accWrEn  ) << Cat(writeShiftR, 0.U(log2Ceil(dataBytes).W))
         accWrDataR                  := Cat(0.U((dataWidth - dataWidth).W), accWrData) << Cat(writeShiftR, 0.U(log2Ceil(dataWidth).W))
 
         // Write Alignment Buffer
-        wrAlign.io.startIn          := start2R
-        wrAlign.io.sizeIn           := resultSize2R
-        wrAlign.io.destAddrIn       := destAddr2R
-        wrAlign.io.sourceAddrIn     := 0.U
-        wrAlign.io.wrValidIn        := accWrEnR
-        wrAlign.io.wrDataIn         := accWrDataR
+        writeAlign.io.startIn       := start2R
+        writeAlign.io.sizeIn        := resultSize2R
+        writeAlign.io.destAddrIn    := destAddr2R
+        writeAlign.io.sourceAddrIn  := 0.U
+        writeAlign.io.wrValidIn     := accWrEnR
+        writeAlign.io.wrDataIn      := accWrDataR
 
-        wrAlign.io.wrReadyIn        := writeFifo.io.enq.ready
-        writeFifo.io.enq.valid      := wrAlign.io.wrEnOut =/= 0.U
-        writeFifo.io.enq.data       := Cat(writeAlign.io.lastOut, 
+        writeAlign.io.wrReadyIn     := writeFifo.io.enq.ready
+        writeFifo.io.enq.valid      := writeAlign.io.wrEnOut =/= 0.U
+        writeFifo.io.enq.bits       := Cat(writeAlign.io.lastOut, 
                                            writeAlign.io.addrOut,
                                            writeAlign.io.wrEnOut,
                                            writeAlign.io.wrDataOut)
@@ -672,18 +681,20 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         switch (arbStateR) {
             is (ArbState.Idle) {
                 tl_d_lastR          := false.B
+                tl_d_maskR          := 0.U
                 when (writeFifo.io.deq.valid) {
                     tl_d_lastR      := writeFifo.io.deq.bits(wrFifoLastIdx)
                     tl_a_data       := writeFifo.io.deq.bits(wrFifoDataHi, wrFifoDataLo)
                     tl_a_addr       := writeFifo.io.deq.bits(wrFifoAddrHi, wrFifoAddrLo)
                     tl_a_mask       := writeFifo.io.deq.bits(wrFifoEnHi, wrFifoEnLo)
-                    tl_a_bitsR      := edge.Put(0.U, tl_a_addr, log2Ceil(blockBytes).U, tl_a_data, tl_a_mask)._2
+                    tl_a_bitsR      := edge.Put(0.U, tl_a_addr, log2Ceil(beatBytes).U, tl_a_data, tl_a_mask)._2
                     tl_a_validR     := true.B
                     wrFifoReadyR    := true.B
                     arbStateR       := ArbState.WaitA
                 } .elsewhen (readFifo.io.deq.ready) {
-                    tl_a_addr       := readFifo.io.deq.bits(addrBits+blockBytes-1, blockBytes)
-                    tl_a_bitsR      := edge.Get(0.U, tl_a_addr, log2Ceil(blockBytes).U)._2
+                    tl_d_maskR      := readFifo.io.deq.bits(rdFifoEnHi, rdFifoEnLo)
+                    tl_a_addr       := readFifo.io.deq.bits(rdFifoAddrHi, rdFifoAddrLo)
+                    tl_a_bitsR      := edge.Get(0.U, tl_a_addr, log2Ceil(beatBytes).U)._2
                     tl_a_validR     := true.B
                     rdFifoReadyR    := true.B
                     arbStateR       := ArbState.WaitA
@@ -700,7 +711,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
                 tl_d_readyR         := readAlign.io.wrReadyOut
                 when (tl.d.fire) {
                     tl_d_readyR     := false.B
-                    tl_d_validR     := edge.hasData(tl.d.bits)
+                    tl_d_validR     := tl_d_maskR
                     when (tl_d_lastR) {
                         doneR       := true.B
                     }
@@ -709,6 +720,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         }
 
         tl_d_dataR                  := edge.data(tl.d.bits) 
+        io.doneOut                  := doneR
 
         readFifo.io.deq.ready       := rdFifoReadyR
         writeFifo.io.deq.ready      := wrFifoReadyR
@@ -731,19 +743,19 @@ class CnnHwAccelerator(params: CnnHwAcceleratorParams, managerBeatBytes: Int, cl
     class Impl extends LazyModuleImp(this) {
 
         val io = IO(new Bundle{
-            val done = Output(Bool())
+            val doneOut = Output(Bool())
         })
         
-        accClient.module.io.dataAddr   := accManager.module.io.dataAddr
-        accClient.module.io.dataCols   := accManager.module.io.dataCols
-        accClient.module.io.dataRows   := accManager.module.io.dataRows
-        accClient.module.io.filtAddr   := accManager.module.io.filtAddr
-        accClient.module.io.filtCols   := accManager.module.io.filtCols
-        accClient.module.io.filtRows   := accManager.module.io.filtRows
-        accClient.module.io.destAddr   := accManager.module.io.destAddr
-        accClient.module.io.start      := accManager.module.io.start
+        accClient.module.io.dataAddrIn   := accManager.module.io.dataAddrOut
+        accClient.module.io.dataColsIn   := accManager.module.io.dataColsOut
+        accClient.module.io.dataRowsIn   := accManager.module.io.dataRowsOut
+        accClient.module.io.filtAddrIn   := accManager.module.io.filtAddrOut
+        accClient.module.io.filtColsIn   := accManager.module.io.filtColsOut
+        accClient.module.io.filtRowsIn   := accManager.module.io.filtRowsOut
+        accClient.module.io.destAddrIn   := accManager.module.io.destAddrOut
+        accClient.module.io.startIn      := accManager.module.io.startOut
 
-        io.done := accClient.module.io.done
+        io.doneOut := accClient.module.io.doneOut
     }
 }
 
@@ -753,7 +765,7 @@ trait CanHaveCnnHwAccelerator { this: BaseSubsystem =>
     private val pbus = locateTLBusWrapper(PBUS)
     private val fbus = locateTLBusWrapper(FBUS)
     
-    val accelerator_done = p(DMAKey) match {
+    val accelerator_done = p(CnnHwAcceleratorKey) match {
         case Some(params) => {
 
             val domain = pbus.generateSynchronousDomain.suggestName("cnn_hw_accelerator_domain")
@@ -764,7 +776,7 @@ trait CanHaveCnnHwAccelerator { this: BaseSubsystem =>
 	    
             val accelerator_done = domain{ InModuleBody {
                 val done = IO(Output(Bool())).suggestName("accelerator_done")
-                done := accelerator.module.io.done
+                done := accelerator.module.io.doneOut
                 done
             } }
 
