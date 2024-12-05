@@ -67,4 +67,3 @@ module sp_ram (
     assign rdAckOut  = rdAckR;
 
 endmodule
-

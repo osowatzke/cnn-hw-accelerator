@@ -1,0 +1,46 @@
+base_dir=$(abspath ../../../../../..)
+vsrc_dir=$(abspath .)
+
+PREPROC_VERILOG = cnn_hw_accelerator.preprocessed.v
+
+.PHONY: default $(PREPROC_VERILOG)
+default: $(PREPROC_VERILOG)
+
+ALL_VSRCS = \
+	$(vsrc_dir)/counter.v \
+	$(vsrc_dir)/delay.v \
+	$(vsrc_dir)/sp_ram.v \
+	$(vsrc_dir)/dp_ram.v \
+	$(vsrc_dir)/fifo_srl.v \
+	$(vsrc_dir)/fifo_spdr.v \
+	$(vsrc_dir)/fifo.v \
+	$(vsrc_dir)/floating_point_add.v \
+	$(vsrc_dir)/floating_point_accumulator.v \
+	$(vsrc_dir)/floating_point_multiply.v \
+	$(vsrc_dir)/multiply_and_accumulate.v \
+	$(vsrc_dir)/cnn_hw_accelerator.v
+
+lookup_dirs = $(shell find -L $(ibex_dir) -name target -prune -o -type d -print 2> /dev/null | grep '.*/\($(1)\)$$')
+INC_DIR_NAMES ?= vendor/lowrisc_ip/ip/prim/rtl formal/data_ind_timing vendor/lowrisc_ip/dv/sv/dv_utils
+INC_DIRS ?= $(foreach dir_name,$(INC_DIR_NAMES),$(call lookup_dirs,$(dir_name)))
+
+# these flags are specific to Chipyard
+EXTRA_PREPROC_DEFINES ?=
+PREPROC_DEFINES ?= \
+	VERILATOR \
+	$(EXTRA_PREPROC_DEFINES)
+
+PREPROC_SCRIPT = $(base_dir)/scripts/insert-includes.py
+
+INC_DIRS = $(sort $(dir $(call lookup_srcs,$(vsrc_dir)/vmod,vh)))
+
+$(PREPROC_VERILOG): $(ALL_VSRCS)
+	mkdir -p $(dir $(PREPROC_VERILOG))
+	$(foreach def,$(PREPROC_DEFINES),echo "\`define $(def)" >> def.v; )
+	$(foreach def,$(PREPROC_DEFINES),echo "\`undef $(def)" >> undef.v; )
+	cat def.v $(ALL_VSRCS) undef.v > combined.sv
+	$(PREPROC_SCRIPT) combined.sv $@ $(INC_DIRS)
+	rm -rf combined.sv def.v undef.v
+
+clean:
+	rm -rf $(PREPROC_VERILOG)

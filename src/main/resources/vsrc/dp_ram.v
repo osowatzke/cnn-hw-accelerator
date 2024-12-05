@@ -98,4 +98,3 @@ module dp_ram (
     assign rdAckBOut  = rdAckBR;
     
 endmodule
-

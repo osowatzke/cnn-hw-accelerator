@@ -30,5 +30,3 @@ module delay (
     assign dataOut = dataR[LATENCY-1];
         
 endmodule
-    
-    

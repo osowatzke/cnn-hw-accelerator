@@ -1,5 +1,7 @@
 package cnnHwAccelerator
 
+import sys.process._
+
 import chisel3._
 import chisel3.util._
 import chisel3.experimental._
@@ -9,6 +11,8 @@ import freechips.rocketchip.subsystem._
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.regmapper._
+
+// import scala.collection.mutable.{ListBuffer}
 
 case class CnnHwAcceleratorParams (
     address: BigInt = 0x40000,
@@ -49,7 +53,9 @@ class CnnHwAcceleratorBlackBox(
     "BUS_ADDR_WIDTH" -> IntParam(BUS_ADDR_WIDTH),
     "BUS_DATA_WIDTH" -> IntParam(BUS_DATA_WIDTH),
     "VECTOR_SIZE"    -> IntParam(VECTOR_SIZE),
-    "MAX_SIZE"       -> IntParam(MAX_SIZE))) with HasBlackBoxResource {
+    "MAX_SIZE"       -> IntParam(MAX_SIZE))) with HasBlackBoxPath {
+
+    override def desiredName: String = "cnn_hw_accelerator"
 
     val io = IO(new CnnHwAcceleratorIO(
         BUS_ADDR_WIDTH,
@@ -57,7 +63,14 @@ class CnnHwAcceleratorBlackBox(
         VECTOR_SIZE,
         MAX_SIZE))
     
-    addResource("/vsrc/cnn_hw_accelerator.v")
+    val chipyardDir = System.getProperty("user.dir")
+    val vsrcDir     = s"$chipyardDir/generators/cnn-hw-accelerator/src/main/resources/vsrc"
+
+    val proc = s"make -C $vsrcDir -f AltMakefile default"
+    require(proc.! == 0, "Failed to run preprocessing step")
+
+    addPath(s"$vsrcDir/cnn_hw_accelerator.preprocessed.v")
+    // addResource("/vsrc/cnn_hw_accelerator.v")
 }
 
 class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: Int) extends Module
@@ -80,18 +93,14 @@ class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: In
     })
 
     def getMask(bytesLeft : UInt) : UInt = {
-        val mask = WireInit(0.U(beatBytes.W))
-        when (bytesLeft >= beatBytes.U) {
-            mask  := -1.S(beatBytes.W).asUInt
-        } .otherwise {
-            for (i<-0 to (beatBytes-1)) {
-                when (bytesLeft(log2Ceil(beatBytes)-1, 0) > i.U)
-                {
-                    mask(i) := true.B
-                }
+        val mask = VecInit(Seq.fill(beatBytes)(false.B))
+        for (i<-0 to (beatBytes-1)) {
+            when (bytesLeft > i.U)
+            {
+                mask(i) := true.B
             }
         }
-        return mask
+        return mask.asUInt
     }
 
     object State extends ChiselEnum
@@ -148,7 +157,7 @@ class ReadController(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: In
     val rdEn2R       = Reg(UInt(beatBytes.W))
 
     valid2R         := validR
-    addr2R          := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
+    addr2R          := Cat(addrR(addrWidth-1, shiftWidth), 0.U(shiftWidth.W))
     rdEn2R          := rdEnR << shiftR
     last2R          := lastR
 
@@ -183,18 +192,14 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     })
 
     def getMask(bytesLeft : UInt) : UInt = {
-        val mask = WireInit(0.U(beatBytes.W))
-        when (bytesLeft >= beatBytes.U) {
-            mask  := -1.S(beatBytes.W).asUInt
-        } .otherwise {
-            for (i<-0 to (beatBytes-1)) {
-                when (bytesLeft(log2Ceil(beatBytes)-1, 0) > i.U)
-                {
-                    mask(i) := true.B
-                }
+        val mask = VecInit(Seq.fill(beatBytes)(false.B))
+        for (i<-0 to (beatBytes-1)) {
+            when (bytesLeft > i.U)
+            {
+                mask(i) := true.B
             }
         }
-        return mask
+        return mask.asUInt
     }
 
     object State extends ChiselEnum
@@ -253,7 +258,7 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     val shift2R  = Reg(UInt())
 
     valid2R     := validR
-    addr2R      := Cat(addrR(addrWidth, shiftWidth), 0.U(shiftWidth.W))
+    addr2R      := Cat(addrR(addrWidth-1, shiftWidth), 0.U(shiftWidth.W))
     mask2R      := (maskR << addrR(shiftWidth-1, 0)) >> addrR(shiftWidth-1, 0)
     shift2R     := shiftR
     last2R      := lastR
@@ -281,9 +286,9 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     val shiftHi     = shiftLo + shiftWidth - 1
     val lastIdx     = shiftHi + 1
     
-    val byteFifoWrReady = WireInit(0.U(beatBytes.W))
     val byteFifoRdReady = WireInit(0.U(beatBytes.W))
-    val byteFifoRdValid = WireInit(0.U(beatBytes.W))
+    val byteFifoWrReady = VecInit(Seq.fill(beatBytes)(false.B))
+    val byteFifoRdValid = VecInit(Seq.fill(beatBytes)(false.B))
     val byteFifoRdData  = VecInit(Seq.fill(beatBytes)(0.U(8.W)))
 
     for (i <- 0 to (beatBytes-1)) {
@@ -297,12 +302,14 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
     }
     
     val wrReadyR     = RegInit(false.B)
-    wrReadyR        := (byteFifoWrReady === -1.S(beatBytes.W).asUInt)
+    wrReadyR        := (byteFifoWrReady.asUInt === -1.S(beatBytes.W).asUInt)
 
     io.wrReadyOut   := wrReadyR
 
     val rdReady      = WireInit(false.B)
-    rdReady         := io.wrReadyIn & ctrlFifo.io.deq.valid & (ctrlFifo.io.deq.bits === byteFifoRdValid)
+    rdReady         := io.wrReadyIn & ctrlFifo.io.deq.valid & (ctrlFifo.io.deq.bits === byteFifoRdValid.asUInt)
+
+    ctrlFifo.io.deq.ready := rdReady
 
     when (rdReady) {
         byteFifoRdReady := ctrlFifo.io.deq.bits(maskHi, maskLo)
@@ -631,6 +638,11 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
             dataRowsR               := io.dataRowsIn(dimWidth-1, 0)
         }
 
+        // Accelerator clock and reset
+        // Connect to implicit clock and reset
+        accelerator.io.clkIn        := clock
+        accelerator.io.rstIn        := reset
+
         // Source Connections
         accelerator.io.filtRowsIn   := filtRowsR
         accelerator.io.filtColsIn   := filtColsR
@@ -643,6 +655,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         accelerator.io.addrIn       := readAlign.io.addrOut
 
         // Sink Connections
+        accelerator.io.readyIn      := writeAlign.io.wrReadyOut
         accWrValid                  := accelerator.io.validOut & writeAlign.io.wrReadyOut
         when (io.startIn) {
             writeShiftR             := 0.U
