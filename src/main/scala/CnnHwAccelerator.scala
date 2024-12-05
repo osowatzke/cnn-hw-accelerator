@@ -15,7 +15,7 @@ import freechips.rocketchip.regmapper._
 // import scala.collection.mutable.{ListBuffer}
 
 case class CnnHwAcceleratorParams (
-    address: BigInt = 0x40000,
+    address: BigInt = 0x4000,
     vectorSize: Int = 8,
     maxSize: Int = 4096)
 
@@ -66,8 +66,8 @@ class CnnHwAcceleratorBlackBox(
     val chipyardDir = System.getProperty("user.dir")
     val vsrcDir     = s"$chipyardDir/generators/cnn-hw-accelerator/src/main/resources/vsrc"
 
-    val proc = s"make -C $vsrcDir -f AltMakefile default"
-    require(proc.! == 0, "Failed to run preprocessing step")
+    // val proc = s"make -C $vsrcDir -f AltMakefile default"
+    // require(proc.! == 0, "Failed to run preprocessing step")
 
     addPath(s"$vsrcDir/cnn_hw_accelerator.preprocessed.v")
     // addResource("/vsrc/cnn_hw_accelerator.v")
@@ -295,7 +295,7 @@ class AlignmentBuffer(maxSize: Int, elemWidth: Int, addrWidth: Int, beatBytes: I
         val byteFifo             = Module(new Fifo(UInt(8.W), 8, 2))
         byteFifo.io.enq.valid   := io.wrValidIn(i)
         byteFifo.io.enq.bits    := (io.wrDataIn >> (8 * i))(7, 0)
-        byteFifoWrReady(i)      := byteFifo.io.enq.valid
+        byteFifoWrReady(i)      := byteFifo.io.enq.ready
         byteFifo.io.deq.ready   := byteFifoRdReady(i) 
         byteFifoRdValid(i)      := byteFifo.io.deq.valid
         byteFifoRdData(i)       := byteFifo.io.deq.bits
@@ -637,7 +637,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
             dataColsR               := io.dataColsIn(dimWidth-1, 0)
             dataRowsR               := io.dataRowsIn(dimWidth-1, 0)
         }
-
+        
         // Accelerator clock and reset
         // Connect to implicit clock and reset
         accelerator.io.clkIn        := clock
@@ -704,7 +704,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
                     tl_a_validR     := true.B
                     wrFifoReadyR    := true.B
                     arbStateR       := ArbState.WaitA
-                } .elsewhen (readFifo.io.deq.ready) {
+                } .elsewhen (readFifo.io.deq.valid) {
                     tl_d_maskR      := readFifo.io.deq.bits(rdFifoEnHi, rdFifoEnLo)
                     tl_a_addr       := readFifo.io.deq.bits(rdFifoAddrHi, rdFifoAddrLo)
                     tl_a_bitsR      := edge.Get(0.U, tl_a_addr, log2Ceil(beatBytes).U)._2
@@ -716,15 +716,15 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
             is (ArbState.WaitA) {
                 when (tl.a.fire) {
                     tl_a_validR     := false.B
-                    tl_d_readyR     := readAlign.io.wrReadyOut
+                    tl_d_readyR     := true.B
                     arbStateR       := ArbState.WaitD
                 }
             }
             is (ArbState.WaitD) {
-                tl_d_readyR         := readAlign.io.wrReadyOut
                 when (tl.d.fire) {
                     tl_d_readyR     := false.B
                     tl_d_validR     := tl_d_maskR
+                    arbStateR       := ArbState.Idle
                     when (tl_d_lastR) {
                         doneR       := true.B
                     }
@@ -732,7 +732,10 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
             }
         }
 
-        tl_d_dataR                  := edge.data(tl.d.bits) 
+        tl.a.valid                  := tl_a_validR
+        tl.a.bits                   := tl_a_bitsR
+        tl.d.ready                  := tl_d_readyR && readAlign.io.wrReadyOut
+        tl_d_dataR                  := edge.data(tl.d.bits)
         io.doneOut                  := doneR
 
         readFifo.io.deq.ready       := rdFifoReadyR
@@ -782,7 +785,7 @@ trait CanHaveCnnHwAccelerator { this: BaseSubsystem =>
         case Some(params) => {
 
             val domain = pbus.generateSynchronousDomain.suggestName("cnn_hw_accelerator_domain")
-            val accelerator = domain{LazyModule(new CnnHwAccelerator(params, pbus.beatBytes, fbus.beatBytes)(p))}
+            val accelerator = domain{LazyModule(new CnnHwAccelerator(params, pbus.beatBytes, pbus.beatBytes)(p))} // fbus.beatBytes)(p))}
 
             pbus.coupleTo(managerName) { accelerator.manager := TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _ }
             fbus.coupleFrom(clientName) { _ := accelerator.client }
