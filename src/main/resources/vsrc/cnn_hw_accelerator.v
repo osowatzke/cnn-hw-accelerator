@@ -364,6 +364,9 @@ module cnn_hw_accelerator (
         filtAddr6R  <= (filtAddr5R << (filtShift5R*RAM_ADDR_WIDTH)) | (filtAddr5R >> ((VECTOR_SIZE - filtShift5R)*RAM_ADDR_WIDTH));
     end
     
+    // Pipeline #1
+    reg throttleR;
+    
     // Pipeline #2
     reg [VECTOR_SIZE-1:0] rdEn2R;
     reg valid2R;
@@ -384,6 +387,7 @@ module cnn_hw_accelerator (
     // Read Enable Process
     always @(posedge clkIn) begin
         if (rstIn) begin
+            throttleR   <= 0;
             valid2R     <= 0;
             rdEn2R      <= 0;
             rdEn3R      <= 0;
@@ -393,8 +397,11 @@ module cnn_hw_accelerator (
             filtRdEn6R  <= 0;
         end else begin
         
+            // Pipeline #1
+            throttleR   <= filtColDoneR & filtRowDoneR & !fifoWrReady;
+            
             // Pipeline #2
-            valid2R     <= validR & !(filtColDoneR & filtRowDoneR & !fifoWrReady);
+            valid2R     <= validR & !throttleR;
             
             // Determine which bits of read enable are high
             for (j = 0; j < VECTOR_SIZE; j = j + 1) begin
