@@ -353,6 +353,7 @@ class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(im
             val filtRowsOut   = Output(UInt(32.W))
             val destAddrOut   = Output(UInt(64.W))
             val startOut      = Output(Bool())
+            val busyIn        = Input(Bool())
         })
 
         val dataAddr   = RegInit(0.U(64.W))
@@ -366,14 +367,15 @@ class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(im
         start.ready   := true.B
 
         node.regmap(
-            0x00 -> Seq(RegField(64, dataAddr)),
-            0x08 -> Seq(RegField(32, dataCols)),
-            0x0C -> Seq(RegField(32, dataRows)),
-            0x10 -> Seq(RegField(64, filtAddr)),
-            0x18 -> Seq(RegField(32, filtCols)),
-            0x1C -> Seq(RegField(32, filtRows)),
-            0x20 -> Seq(RegField(64, destAddr)),
-            0x28 -> Seq(RegField.w(1, start)))
+            0x00 -> Seq(RegField  (64, dataAddr )),
+            0x08 -> Seq(RegField  (32, dataCols )),
+            0x0C -> Seq(RegField  (32, dataRows )),
+            0x10 -> Seq(RegField  (64, filtAddr )),
+            0x18 -> Seq(RegField  (32, filtCols )),
+            0x1C -> Seq(RegField  (32, filtRows )),
+            0x20 -> Seq(RegField  (64, destAddr )),
+            0x28 -> Seq(RegField.w( 1, start    )),
+            0x2C -> Seq(RegField.r( 1, io.busyIn)))
 
         io.dataAddrOut  := dataAddr
         io.dataColsOut  := dataCols
@@ -408,7 +410,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytesUpdate: In
             val filtRowsIn = Input(UInt(32.W))
             val destAddrIn = Input(UInt(64.W))
             val startIn    = Input(Bool())
-            val doneOut    = Output(Bool())
+            val busyOut    = Output(Bool())
         })
 
         val (tl, edge) = node.out(0)
@@ -726,11 +728,18 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytesUpdate: In
             }
         }
 
+        val busyR = RegInit(false.B)
+        when (io.startIn) {
+            busyR                   := true.B
+        } .elsewhen(doneR) {
+            busyR                   := false.B
+        }
+
         tl.a.valid                  := tl_a_validR
         tl.a.bits                   := tl_a_bitsR
         tl.d.ready                  := tl_d_readyR && readAlign.io.wrReadyOut
         tl_d_dataR                  := edge.data(tl.d.bits)
-        io.doneOut                  := doneR
+        io.busyOut                  := busyR
 
         readFifo.io.deq.ready       := rdFifoReadyR
         writeFifo.io.deq.ready      := wrFifoReadyR
@@ -753,8 +762,10 @@ class CnnHwAccelerator(params: CnnHwAcceleratorParams, managerBeatBytes: Int, cl
     class Impl extends LazyModuleImp(this) {
 
         val io = IO(new Bundle{
-            val doneOut = Output(Bool())
+            val busyOut = Output(Bool())
         })
+
+        accManager.module.io.busyIn      := accClient.module.io.busyOut
         
         accClient.module.io.dataAddrIn   := accManager.module.io.dataAddrOut
         accClient.module.io.dataColsIn   := accManager.module.io.dataColsOut
@@ -763,9 +774,9 @@ class CnnHwAccelerator(params: CnnHwAcceleratorParams, managerBeatBytes: Int, cl
         accClient.module.io.filtColsIn   := accManager.module.io.filtColsOut
         accClient.module.io.filtRowsIn   := accManager.module.io.filtRowsOut
         accClient.module.io.destAddrIn   := accManager.module.io.destAddrOut
-        accClient.module.io.startIn      := accManager.module.io.startOut
+        accClient.module.io.startIn      := accManager.module.io.startOut        
 
-        io.doneOut := accClient.module.io.doneOut
+        io.busyOut := accClient.module.io.busyOut
     }
 }
 
@@ -775,7 +786,7 @@ trait CanHaveCnnHwAccelerator { this: BaseSubsystem =>
     private val pbus = locateTLBusWrapper(PBUS)
     private val fbus = locateTLBusWrapper(FBUS)
     
-    val accelerator_done = p(CnnHwAcceleratorKey) match {
+    val accelerator_busy = p(CnnHwAcceleratorKey) match {
         case Some(params) => {
 
             val domain = pbus.generateSynchronousDomain.suggestName("cnn_hw_accelerator_domain")
@@ -784,13 +795,13 @@ trait CanHaveCnnHwAccelerator { this: BaseSubsystem =>
             pbus.coupleTo(managerName) { accelerator.manager := TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _ }
             fbus.coupleFrom(clientName) { _ := accelerator.client }
 	    
-            val accelerator_done = domain{ InModuleBody {
-                val done = IO(Output(Bool())).suggestName("accelerator_done")
-                done := accelerator.module.io.doneOut
-                done
+            val accelerator_busy = domain{ InModuleBody {
+                val busy = IO(Output(Bool())).suggestName("accelerator_busy")
+                busy := accelerator.module.io.busyOut
+                busy
             } }
 
-            Some(accelerator_done)
+            Some(accelerator_busy)
         }
         case None => None
     }
