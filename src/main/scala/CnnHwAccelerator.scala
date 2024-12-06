@@ -17,7 +17,7 @@ import freechips.rocketchip.regmapper._
 case class CnnHwAcceleratorParams (
     address: BigInt = 0x4000,
     vectorSize: Int = 8,
-    maxSize: Int = 4096)
+    maxSize: Int = 16384)
 
 case object CnnHwAcceleratorKey extends Field[Option[CnnHwAcceleratorParams]](None)
 
@@ -62,15 +62,21 @@ class CnnHwAcceleratorBlackBox(
         BUS_DATA_WIDTH,
         VECTOR_SIZE,
         MAX_SIZE))
-    
+
     val chipyardDir = System.getProperty("user.dir")
     val vsrcDir     = s"$chipyardDir/generators/cnn-hw-accelerator/src/main/resources/vsrc"
 
-    // val proc = s"make -C $vsrcDir -f AltMakefile default"
-    // require(proc.! == 0, "Failed to run preprocessing step")
-
-    addPath(s"$vsrcDir/cnn_hw_accelerator.preprocessed.v")
-    // addResource("/vsrc/cnn_hw_accelerator.v")
+    addPath(s"$vsrcDir/cnn_hw_accelerator.v")
+    addPath(s"$vsrcDir/counter.v")
+    addPath(s"$vsrcDir/delay.v")
+    addPath(s"$vsrcDir/dp_ram.v")
+    addPath(s"$vsrcDir/fifo_spdr.v")
+    addPath(s"$vsrcDir/fifo_srl.v")
+    addPath(s"$vsrcDir/fifo.v")
+    addPath(s"$vsrcDir/floating_point_accumulator.v")
+    addPath(s"$vsrcDir/floating_point_add.v")
+    addPath(s"$vsrcDir/floating_point_multiply.v")
+    addPath(s"$vsrcDir/multiply_and_accumulate.v")
 }
 
 class ReadController(sizeWidth: Int, addrWidth: Int, beatBytes: Int) extends Module
@@ -388,10 +394,8 @@ class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(im
     }
 }
 
-class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytesUpdate: Int)(implicit p: Parameters) extends LazyModule
+class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(implicit p: Parameters) extends LazyModule
 {
-    val beatBytes = 8
-
     val node = TLClientNode(Seq(TLMasterPortParameters.v1(Seq(TLClientParameters(
         name = "cnn-hw-accelerator-client",
         sourceId = IdRange(0, 1))))))
