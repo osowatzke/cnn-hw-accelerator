@@ -314,7 +314,7 @@ class AlignmentBuffer(sizeWidth: Int, addrWidth: Int, beatBytes: Int) extends Mo
     wrDataOutR          := byteFifoRdData.asUInt
     addrOutR            := ctrlFifo.io.deq.bits(addrHi, addrLo)
     shiftOutR           := ctrlFifo.io.deq.bits(shiftHi, shiftLo)
-    lastOutR            := ctrlFifo.io.deq.bits(lastIdx)
+    lastOutR            := ctrlFifo.io.deq.bits(lastIdx) & rdReady
 
     val wrEnOut2R        = RegInit(0.U(beatBytes.W))
     val wrDataOut2R      = Reg(UInt(dataWidth.W))
@@ -386,8 +386,10 @@ class CnnHwAcceleratorManager(params: CnnHwAcceleratorParams, beatBytes: Int)(im
     }
 }
 
-class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(implicit p: Parameters) extends LazyModule
+class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytesUpdate: Int)(implicit p: Parameters) extends LazyModule
 {
+    val beatBytes = 8
+
     val node = TLClientNode(Seq(TLMasterPortParameters.v1(Seq(TLClientParameters(
         name = "cnn-hw-accelerator-client",
         sourceId = IdRange(0, 1))))))
@@ -432,7 +434,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
 
         // Write FIFO Configuration
         val wrFifoDataLo  = 0
-        val wrFifoDataHi  = wrFifoDataLo + dataWidth - 1
+        val wrFifoDataHi  = wrFifoDataLo + busDataWidth - 1
         val wrFifoEnLo    = wrFifoDataHi + 1
         val wrFifoEnHi    = wrFifoEnLo + beatBytes - 1
         val wrFifoAddrLo  = wrFifoEnHi + 1
@@ -515,7 +517,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         val readCtrl = Module(new ReadController(countWidth, busAddrWidth, beatBytes))
 
         // Read Alignment Buffer
-        val readAlign = Module(new AlignmentBuffer(countWidth, addrWidth, beatBytes))
+        val readAlign = Module(new AlignmentBuffer(countWidth, busAddrWidth, beatBytes))
 
         // Read FIFO
         val readFifo    = Module(new Fifo(UInt(rdFifoWidth.W), 8, 2))
@@ -598,7 +600,7 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
         // Read Alignment Buffer Configuration
         readAlign.io.startIn        := rdAlignStartR
         readAlign.io.sizeIn         := rdAlignSizeR(0)
-        readAlign.io.destAddrIn     := Cat(!rdAlignValidR(1), 0.U((addrWidth-1).W))
+        readAlign.io.destAddrIn     := Cat(0.U((busAddrWidth-countWidth).W), !rdAlignValidR(1), 0.U((countWidth-1).W))
         readAlign.io.sourceAddrIn   := rdAlignSourceR(0)
 
         // Connect Bus to Read Alignment Buffer
@@ -660,8 +662,8 @@ class CnnHwAcceleratorClient(params: CnnHwAcceleratorParams, beatBytes: Int)(imp
 
         accWrData                   := accelerator.io.dataOut
 
-        accWrEnR                    := Cat(0.U((beatBytes - dataBytes).W), accWrEn  ) << Cat(writeShiftR, 0.U(log2Ceil(dataBytes).W))
-        accWrDataR                  := Cat(0.U((dataWidth - dataWidth).W), accWrData) << Cat(writeShiftR, 0.U(log2Ceil(dataWidth).W))
+        accWrEnR                    := Cat(0.U((beatBytes    - dataBytes).W), accWrEn  ) << Cat(writeShiftR, 0.U(log2Ceil(dataBytes).W))
+        accWrDataR                  := Cat(0.U((busDataWidth - dataWidth).W), accWrData) << Cat(writeShiftR, 0.U(log2Ceil(dataWidth).W))
 
         // Write Alignment Buffer
         writeAlign.io.startIn       := start2R
@@ -777,7 +779,7 @@ trait CanHaveCnnHwAccelerator { this: BaseSubsystem =>
         case Some(params) => {
 
             val domain = pbus.generateSynchronousDomain.suggestName("cnn_hw_accelerator_domain")
-            val accelerator = domain{LazyModule(new CnnHwAccelerator(params, pbus.beatBytes, pbus.beatBytes)(p))} // fbus.beatBytes)(p))}
+            val accelerator = domain{LazyModule(new CnnHwAccelerator(params, pbus.beatBytes, fbus.beatBytes)(p))} // fbus.beatBytes)(p))}
 
             pbus.coupleTo(managerName) { accelerator.manager := TLFragmenter(pbus.beatBytes, pbus.blockBytes) := _ }
             fbus.coupleFrom(clientName) { _ := accelerator.client }
